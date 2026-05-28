@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=240, height=282, user-scalable=no, initial-scale=1.0">
+    <title>Spotify Player</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle fill='%231DB954' cx='12' cy='12' r='12'/%3E%3Cpath fill='%23000' d='M17.5 12.2c-2.7-1.6-7.2-1.7-9.8-.9-.4.1-.8-.1-.9-.5-.1-.4.1-.8.5-.9 3-1.1 7.9-.9 10.9 1  .4.2.5.7.3 1.1zm1.2-3c-.3.5-.9.6-1.4.4-3.1-1.9-7.8-2.5-11.4-1.1-.5.1-1-.2-1.1-.7s.2-1 .7-1.1c4.1-1.3 9.2-.7 12.7 1.6.5.3.6.9.3 1.3zm.1-3.4C14.1 4.2 7.7 4 4.1 5.2c-.6.2-1.2-.2-1.4-.8-.2-.6.2-1.2.8-1.4 4.2-1.2 11.3-1 15.8 1.6.6.4.8 1.1.5 1.7-.3.5-1 .7-1.6.5z'/%3E%3C/svg%3E">
+    <script>
+      (function () {
+        var q = new URLSearchParams(location.search);
+        var forced = q.get('env');
+        var onR1 = forced === 'r1' || (forced !== 'browser' && (
+          typeof PluginMessageHandler !== 'undefined' ||
+          typeof CreationVoiceHandler !== 'undefined' ||
+          !!window.creationStorage
+        ));
+        document.documentElement.classList.add(onR1 ? 'env-r1' : 'env-browser');
+      })();
+    </script>
+    <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Auth Screen -->
+        <div id="view-auth" class="view active">
+            <div class="auth-container">
+                <div class="spotify-icon">♫</div>
+                <h1>Spotify</h1>
+                <p class="auth-subtitle">Premium account required</p>
+                <p class="auth-hint">Register this Redirect URI in Spotify Dashboard:</p>
+                <p class="auth-redirect-uri" id="auth-redirect-uri"></p>
+                <button id="btn-connect" class="btn-primary">Connect</button>
+            </div>
+        </div>
+
+        <!-- Now Playing Screen -->
+        <div id="view-player" class="view">
+            <div class="player-container">
+                <div class="album-art" id="album-art" role="button" tabindex="0" aria-label="Tap to enlarge album art">
+                    <div class="album-placeholder">♫</div>
+                </div>
+                <div class="track-info">
+                    <div class="track-name" id="track-name">No track</div>
+                    <div class="track-artist" id="track-artist">—</div>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+                <div class="time-display">
+                    <span id="time-current">0:00</span>
+                    <span id="time-total">0:00</span>
+                </div>
+                <div class="controls">
+                    <div class="controls-spacer">
+                        <button class="ctrl-btn ctrl-library" id="btn-library" type="button" aria-label="Browse playlists">☰</button>
+                    </div>
+                    <div class="controls-main">
+                        <button class="ctrl-btn ctrl-first" id="btn-first" type="button" aria-label="First track">⏮</button>
+                        <button class="ctrl-btn ctrl-prev" id="btn-prev" type="button" aria-label="Previous track">⏪</button>
+                        <button class="ctrl-btn ctrl-play" id="btn-play" type="button" aria-label="Play or pause">▶</button>
+                        <button class="ctrl-btn ctrl-next" id="btn-next" type="button" aria-label="Next track">⏩</button>
+                        <button class="ctrl-btn ctrl-last" id="btn-last" type="button" aria-label="Last track">⏭</button>
+                    </div>
+                    <div class="controls-side">
+                        <span class="playback-status" id="playback-status"></span>
+                        <button class="info-btn" id="btn-info" type="button" aria-label="Show controls help" aria-expanded="false">i</button>
+                        <div class="nav-hint" id="nav-hint" role="tooltip">⏮ first • ⏪ prev • ⏩ next • ⏭ last • ☰ songs<br>♫ tap: current list's songs</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Playlist Browser Screen -->
+        <div id="view-playlists" class="view">
+            <div class="list-header">
+                <span class="back-arrow" id="btn-back-player">◀</span>
+                <span class="list-title">Playlists</span>
+            </div>
+            <div class="list-container" id="playlist-list"></div>
+        </div>
+
+        <!-- Track List Screen -->
+        <div id="view-tracks" class="view">
+            <div class="list-header">
+                <span class="back-arrow" id="btn-back-playlists">◀</span>
+                <span class="list-title" id="tracks-title">Tracks</span>
+                <button class="play-all-btn" id="btn-play-all" type="button" aria-label="Play all tracks">▶ All</button>
+            </div>
+            <div class="list-container" id="track-list"></div>
+        </div>
+
+        <!-- Voice Overlay -->
+        <div id="voice-overlay" class="overlay hidden">
+            <div class="voice-indicator">
+                <div class="voice-pulse"></div>
+                <div class="voice-text">Listening...</div>
+            </div>
+        </div>
+
+        <!-- Status Toast -->
+        <div id="toast" class="toast hidden"></div>
+
+        <!-- Boot diagnostic: visible only if the app fails to start (e.g. old WebView).
+             main.js removes this once it initializes successfully. -->
+        <div id="boot-fallback" style="position:fixed;inset:0;z-index:9999;background:#000;color:#1DB954;font-family:monospace;font-size:11px;line-height:1.4;padding:8px;box-sizing:border-box;overflow:auto;">
+            <div style="font-weight:bold;margin-bottom:4px;">Spotify Player — starting…</div>
+            <div id="boot-msg" style="color:#fff;">If this screen stays, the app could not start.</div>
+            <div style="margin-top:6px;color:#888;">Browser:</div>
+            <div id="boot-ua" style="color:#ccc;word-break:break-all;"></div>
+            <div id="boot-err" style="margin-top:6px;color:#ff5555;word-break:break-all;"></div>
+        </div>
+    </div>
+    <script>
+      (function () {
+        try {
+          var ua = document.getElementById('boot-ua');
+          if (ua) ua.textContent = navigator.userAgent;
+        } catch (e) {}
+        window.addEventListener('error', function (ev) {
+          var el = document.getElementById('boot-err');
+          if (el) el.textContent = 'JS error: ' + (ev && ev.message ? ev.message : ev);
+        });
+      })();
+    </script>
+    <script src="https://sdk.scdn.co/spotify-player.js"></script>
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>
