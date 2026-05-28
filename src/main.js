@@ -1120,12 +1120,31 @@ async function init() {
   console.info(`[Spotify R1] env=${runtimeEnv} — Redirect URI:`, SPOTIFY_REDIRECT_URI);
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  // The module parsed and is running, so the WebView is compatible enough
-  // to start the app. Remove the boot diagnostic overlay.
+function bootStatus(msg) {
+  if (window.__boot && window.__boot.status) window.__boot.status(msg);
+}
+function bootError(msg) {
+  if (window.__boot && window.__boot.error) window.__boot.error(msg);
+}
+function bootDone() {
   const bootFallback = document.getElementById('boot-fallback');
   if (bootFallback) bootFallback.remove();
+}
 
+document.addEventListener('DOMContentLoaded', () => {
+  try {
+    bootStatus('Module running — wiring controls…');
+    wireControls();
+    bootStatus('Controls ready — starting app…');
+    init()
+      .then(() => bootDone())
+      .catch((e) => bootError('init() failed: ' + (e && e.message ? e.message : String(e))));
+  } catch (e) {
+    bootError('startup failed: ' + (e && e.message ? e.message : String(e)));
+  }
+});
+
+function wireControls() {
   // Connect button
   document.getElementById('btn-connect').addEventListener('click', startAuth);
 
@@ -1188,5 +1207,4 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   showAuthRedirectHint();
-  init();
-});
+}

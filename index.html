@@ -112,14 +112,36 @@
     </div>
     <script>
       (function () {
+        function showFallback() {
+          var bf = document.getElementById('boot-fallback');
+          if (bf) bf.style.display = 'block';
+        }
+        function setErr(text) {
+          var el = document.getElementById('boot-err');
+          if (el) el.textContent = text;
+          showFallback();
+        }
         try {
           var ua = document.getElementById('boot-ua');
           if (ua) ua.textContent = navigator.userAgent;
         } catch (e) {}
         window.addEventListener('error', function (ev) {
-          var el = document.getElementById('boot-err');
-          if (el) el.textContent = 'JS error: ' + (ev && ev.message ? ev.message : ev);
+          var msg = ev && ev.message ? ev.message : String(ev);
+          if (ev && ev.filename) msg += ' @ ' + ev.filename + ':' + (ev.lineno || '?');
+          setErr('JS error: ' + msg);
         });
+        window.addEventListener('unhandledrejection', function (ev) {
+          var r = ev && ev.reason;
+          setErr('Promise error: ' + (r && r.message ? r.message : String(r)));
+        });
+        // Expose helpers so the app module can report progress / failure.
+        window.__boot = {
+          status: function (text) {
+            var el = document.getElementById('boot-msg');
+            if (el) el.textContent = text;
+          },
+          error: setErr
+        };
       })();
     </script>
     <script src="https://sdk.scdn.co/spotify-player.js"></script>
