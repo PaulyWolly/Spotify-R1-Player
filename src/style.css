@@ -212,6 +212,13 @@ html.env-browser #app {
     margin-bottom: 0.6cqh;
 }
 
+/* In expanded view the buttons sit near the bottom, so show the help tooltip
+   above them instead of below to avoid it being clipped off-screen. */
+.player-container.art-expanded .nav-hint {
+    top: auto;
+    bottom: 130%;
+}
+
 .player-container.art-expanded .ctrl-btn {
     min-width: 20px;
     min-height: 20px;
