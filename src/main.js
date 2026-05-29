@@ -749,22 +749,34 @@ async function spotifyFetch(endpoint, options = {}) {
 
 function initPlayer() {
   if (state.player) return;
-  // R1 WebView: create Spotify.Player only on first user tap (autoplay/DRM rules).
-  if (runtimeEnv === 'r1') {
-    if (typeof Spotify !== 'undefined') {
-      state._spotifySdkLoaded = true;
-    } else if (!window.onSpotifyWebPlaybackSDKReady) {
-      window.onSpotifyWebPlaybackSDKReady = () => {
-        state._spotifySdkLoaded = true;
-      };
-    }
-    return;
-  }
   if (typeof Spotify === 'undefined') {
     window.onSpotifyWebPlaybackSDKReady = () => setupPlayer();
     return;
   }
   setupPlayer();
+}
+
+/** Must run synchronously inside tap/click — do not await before this on R1. */
+function gestureActivateAudioSync() {
+  if (runtimeEnv !== 'r1' || !state.player) return;
+  try {
+    if (typeof state.player.activateElement === 'function') {
+      const p = state.player.activateElement();
+      if (p && typeof p.then === 'function') p.catch(() => {});
+    }
+    state.audioUnlocked = true;
+  } catch (e) {
+    console.warn('gestureActivateAudioSync:', e);
+  }
+}
+
+function fixSpotifyEmbedIframe() {
+  const iframe = document.querySelector('iframe[src*="sdk.scdn.co"]');
+  if (!iframe) return;
+  iframe.setAttribute('allow', 'encrypted-media *; autoplay *');
+  iframe.style.cssText =
+    'display:block!important;position:absolute;width:1px;height:1px;opacity:0;' +
+    'pointer-events:none;left:0;top:0;border:0;';
 }
 
 /** Connect Web Playback SDK from a button tap (required on R1). */
@@ -820,18 +832,14 @@ async function forceUnlockR1Audio() {
 
 async function startR1LocalAudio() {
   if (runtimeEnv !== 'r1' || !state.player) return;
+  fixSpotifyEmbedIframe();
   await forceUnlockR1Audio();
   try {
     const cur = await state.player.getCurrentState();
+    if (cur && !cur.paused) return;
     if (cur?.paused) await state.player.resume();
   } catch (e) {
-    console.warn('startR1LocalAudio resume:', e);
-  }
-  const ok = await apiResumePlayback();
-  if (!ok) {
-    try {
-      await state.player.resume();
-    } catch (e) { /* ignore */ }
+    console.warn('startR1LocalAudio:', e);
   }
 }
 
@@ -863,7 +871,7 @@ function installR1AudioUnlock() {
   if (runtimeEnv !== 'r1' || state._r1UnlockInstalled) return;
   state._r1UnlockInstalled = true;
   const onGesture = () => {
-    forceUnlockR1Audio();
+    gestureActivateAudioSync();
   };
   document.addEventListener('click', onGesture, true);
   document.addEventListener('touchstart', onGesture, { capture: true, passive: true });
@@ -922,9 +930,10 @@ async function setupPlayer() {
       await player.setVolume(0.8);
     } catch (e) { /* ignore */ }
     await transferPlayback(device_id);
+    fixSpotifyEmbedIframe();
     syncNowPlayingFromApi();
     if (runtimeEnv === 'r1') {
-      showToast('Open ☰ pick a song, then ▶', 3500);
+      showToast('Pick a song, then tap ▶ on R1', 3500);
     }
   });
 
@@ -976,8 +985,13 @@ async function setupPlayer() {
   player.addListener('playback_error', ({ message }) => {
     console.error('Playback error:', message);
     if (Date.now() < state.playbackErrorMuteUntil) return;
-    const hint = message ? String(message).slice(0, 72) : 'Playback error';
-    showToast(hint, 5000);
+    state.playbackErrorMuteUntil = Date.now() + 8000;
+    const msg = String(message || '');
+    let hint = msg.slice(0, 72) || 'Playback error';
+    if (runtimeEnv === 'r1') {
+      hint = 'No R1 audio — tap ▶ again. Close Spotify on PC/phone.';
+    }
+    showToast(hint, 6000);
   });
 
   state.player = player;
@@ -1013,14 +1027,14 @@ async function syncNowPlayingFromApi() {
     data.device?.id &&
     data.device.id !== state.deviceId
   ) {
-    if (!state._wrongDeviceWarned) {
-      state._wrongDeviceWarned = true;
+    const now = Date.now();
+    if (!state._lastDeviceSteal || now - state._lastDeviceSteal > 30000) {
+      state._lastDeviceSteal = now;
       const where = data.device.name || 'another device';
-      showToast(`Audio on ${where} — switching to R1…`, 4000);
+      showToast(`Audio was on ${where} — moved to Rabbit R1`, 4000);
+      state.activeDeviceId = null;
+      await ensurePlaybackDevice();
     }
-    state.activeDeviceId = null;
-    await ensurePlaybackDevice();
-    await startR1LocalAudio();
   }
 
   state.isPlaying = !!data.is_playing;
@@ -1164,19 +1178,9 @@ async function togglePlay() {
   }
 
   if (cur.paused) {
-    await forceUnlockR1Audio();
-    const ok = await apiResumePlayback();
-    if (!ok) {
-      try {
-        await state.player.resume();
-        state.isPlaying = true;
-        updatePlayButton();
-      } catch (e) {
-        showToast('Could not start playback', 4000);
-      }
-    } else {
-      await startR1LocalAudio();
-    }
+    await startR1LocalAudio();
+    state.isPlaying = true;
+    updatePlayButton();
     return;
   }
 
@@ -1600,7 +1604,16 @@ function updateProgress() {
 function startProgressTimer() {
   if (state.progressInterval) clearInterval(state.progressInterval);
   if (runtimeEnv === 'r1') {
-    state.progressInterval = setInterval(() => syncNowPlayingFromApi(), 2000);
+    state.progressInterval = setInterval(() => {
+      if (!state.player) {
+        syncNowPlayingFromApi();
+        return;
+      }
+      state.player.getCurrentState().then((cur) => {
+        if (cur) handlePlayerStateChange(cur);
+        else syncNowPlayingFromApi();
+      }).catch(() => syncNowPlayingFromApi());
+    }, 1500);
     return;
   }
   state.progressInterval = setInterval(() => {
@@ -1677,6 +1690,7 @@ function renderTracks() {
 
   container.querySelectorAll('.list-item').forEach(item => {
     item.addEventListener('click', () => {
+      gestureActivateAudioSync();
       const idx = parseInt(item.dataset.index);
       const uris = state.currentPlaylistTracks.map(t => t.uri);
       playTrackUris(uris, idx);
@@ -1838,6 +1852,7 @@ window.addEventListener('scrollDown', () => {
 });
 
 window.addEventListener('sideClick', () => {
+  gestureActivateAudioSync();
   if (state.currentView === 'player') {
     togglePlay();
   }
@@ -2028,6 +2043,7 @@ function bindTap(el, handler) {
     if (now - lastFire < 350) return;
     lastFire = now;
     if (e.cancelable) e.preventDefault();
+    gestureActivateAudioSync();
     handler();
   };
   el.addEventListener('click', run);
