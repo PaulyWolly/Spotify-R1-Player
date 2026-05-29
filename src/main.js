@@ -57,6 +57,7 @@ const state = {
 
 let companionPollTimer = null;
 let r1ApiSyncInterval = null;
+let r1AudioKeepaliveInterval = null;
 let cachedPairSession = null;
 let companionLoginStarted = false;
 
@@ -842,11 +843,49 @@ function fixSpotifyEmbedIframe() {
     'pointer-events:none;left:0;top:0;border:0;';
 }
 
+async function reconnectSpotifyPlayer() {
+  if (!state.player) return false;
+  try {
+    const result = state.player.connect();
+    if (result && typeof result.then === 'function') {
+      const ok = await result;
+      if (!ok) return false;
+    }
+    return waitForDevice(runtimeEnv === 'r1' ? 12000 : 8000);
+  } catch (e) {
+    console.warn('reconnectSpotifyPlayer:', e);
+    return false;
+  }
+}
+
+/** Re-unlock WebView audio and resume SDK playback (R1 drops output after ~10s). */
+async function recoverR1Audio() {
+  if (runtimeEnv !== 'r1' || !state.player) return;
+  fixSpotifyEmbedIframe();
+  gestureActivateAudioSync();
+  await forceUnlockR1Audio();
+  if (!state.deviceId) await reconnectSpotifyPlayer();
+  await ensurePlaybackDevice();
+  try {
+    const snap = await fetchPlayerSnapshot();
+    if (snap?.is_playing) {
+      await resumeLocalPlayback();
+    }
+  } catch (e) {
+    console.warn('recoverR1Audio:', e);
+  }
+}
+
 /** Connect Web Playback SDK from a button tap (required on R1). */
 async function ensurePlayerFromGesture() {
-  if (state.player && state.deviceId) {
-    await unlockWebAudio();
-    return true;
+  if (state.player) {
+    if (!state.deviceId && runtimeEnv === 'r1') {
+      await reconnectSpotifyPlayer();
+    }
+    if (state.deviceId) {
+      await unlockWebAudio(runtimeEnv === 'r1');
+      return true;
+    }
   }
 
   if (runtimeEnv === 'r1' && !state.player) {
@@ -896,11 +935,16 @@ async function forceUnlockR1Audio() {
 async function startR1LocalAudio() {
   if (runtimeEnv !== 'r1' || !state.player) return;
   fixSpotifyEmbedIframe();
+  gestureActivateAudioSync();
   await forceUnlockR1Audio();
+  if (!state.deviceId) await reconnectSpotifyPlayer();
   try {
     const cur = await state.player.getCurrentState();
-    if (cur && !cur.paused) return;
-    if (cur?.paused) await state.player.resume();
+    if (cur?.paused) {
+      await state.player.resume();
+    } else if (!cur) {
+      await resumeLocalPlayback();
+    }
   } catch (e) {
     console.warn('startR1LocalAudio:', e);
   }
@@ -1002,12 +1046,22 @@ async function setupPlayer() {
 
   player.addListener('not_ready', ({ device_id }) => {
     console.log('Device offline:', device_id);
-    state.deviceId = null;
-    state.activeDeviceId = null;
+    state.audioUnlocked = false;
+    if (runtimeEnv === 'r1') {
+      showToast('Audio connection lost — tap ▶', 4500);
+      setTimeout(() => {
+        reconnectSpotifyPlayer().then((ok) => {
+          if (ok) recoverR1Audio();
+        });
+      }, 400);
+    }
   });
 
   player.addListener('player_state_changed', (playerState) => {
-    if (!playerState) return;
+    if (!playerState) {
+      if (runtimeEnv === 'r1') state.audioUnlocked = false;
+      return;
+    }
     handlePlayerStateChange(playerState);
   });
 
@@ -1052,7 +1106,8 @@ async function setupPlayer() {
     const msg = String(message || '');
     let hint = msg.slice(0, 72) || 'Playback error';
     if (runtimeEnv === 'r1') {
-      hint = 'No R1 audio — tap ▶ again. Close Spotify on PC/phone.';
+      hint = 'Audio hiccup — tap ▶ or scroll. Close Spotify on PC.';
+      recoverR1Audio();
     }
     showToast(hint, 6000);
   });
@@ -1247,6 +1302,7 @@ async function togglePlay() {
     return;
   }
 
+  gestureActivateAudioSync();
   if (!(await ensurePlayerFromGesture())) return;
   await preparePlaybackForUserAction();
 
@@ -1294,6 +1350,7 @@ async function nextTrack() {
   if (result?._error && state.player) {
     try { await state.player.nextTrack(); } catch (e) { /* ignore */ }
   }
+  await startR1LocalAudio();
 }
 
 async function prevTrack() {
@@ -1308,6 +1365,7 @@ async function prevTrack() {
   if (result?._error && state.player) {
     try { await state.player.previousTrack(); } catch (e) { /* ignore */ }
   }
+  await startR1LocalAudio();
 }
 
 /** |◀◀ — jump to the start of the current playlist/list. */
@@ -1689,9 +1747,20 @@ function updateProgress() {
   document.getElementById('time-total').textContent = formatTime(state.durationMs);
 }
 
+function startR1AudioKeepalive() {
+  if (r1AudioKeepaliveInterval) clearInterval(r1AudioKeepaliveInterval);
+  if (runtimeEnv !== 'r1') return;
+  r1AudioKeepaliveInterval = setInterval(() => {
+    if (!state.isPlaying || !state.player) return;
+    gestureActivateAudioSync();
+    unlockWebAudio(true).catch(() => {});
+  }, 4000);
+}
+
 function startProgressTimer() {
   if (state.progressInterval) clearInterval(state.progressInterval);
   if (r1ApiSyncInterval) clearInterval(r1ApiSyncInterval);
+  if (r1AudioKeepaliveInterval) clearInterval(r1AudioKeepaliveInterval);
   if (runtimeEnv === 'r1') {
     state.progressInterval = setInterval(() => {
       if (state.isPlaying && state.durationMs > 0) {
@@ -1701,6 +1770,7 @@ function startProgressTimer() {
       }
     }, 500);
     r1ApiSyncInterval = setInterval(() => syncNowPlayingFromApi(), 4000);
+    startR1AudioKeepalive();
     return;
   }
   state.progressInterval = setInterval(() => {
