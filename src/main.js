@@ -53,7 +53,8 @@ const state = {
   _pendingAudioGesture: false,
   activeDeviceId: null,
   playbackErrorMuteUntil: 0,
-  lastApiProgressMs: null
+  lastApiProgressMs: null,
+  userPaused: false
 };
 
 let companionPollTimer = null;
@@ -61,6 +62,7 @@ let r1ApiSyncInterval = null;
 let r1AudioKeepaliveInterval = null;
 let r1AutoRenewInterval = null;
 let r1AudioHintTimer = null;
+let r1BoostTimers = [];
 let cachedPairSession = null;
 let companionLoginStarted = false;
 
@@ -867,8 +869,15 @@ function armR1AudioContinuePrompt() {
  * R1 WebView drops Spotify audio ~10s in. Re-issue play+seek via API (no SDK seek —
  * that was likely causing the cutoff). Runs on a timer before the 10s wall.
  */
+function cancelR1BoostTimers() {
+  r1BoostTimers.forEach((id) => clearTimeout(id));
+  r1BoostTimers = [];
+}
+
 async function r1RenewPlaybackSession() {
-  if (runtimeEnv !== 'r1' || !state.isPlaying || !state.deviceId) return false;
+  if (runtimeEnv !== 'r1' || state.userPaused || !state.isPlaying || !state.deviceId) {
+    return false;
+  }
   const pos = Math.max(0, Math.floor(state.progressMs));
   await ensurePlaybackDevice();
   await forceUnlockR1Audio();
@@ -909,7 +918,7 @@ function startR1AutoRenew() {
   stopR1AutoRenew();
   if (runtimeEnv !== 'r1') return;
   r1AutoRenewInterval = setInterval(() => {
-    if (state.isPlaying) r1RenewPlaybackSession();
+    if (state.isPlaying && !state.userPaused) r1RenewPlaybackSession();
   }, 8000);
 }
 
@@ -923,11 +932,13 @@ function stopR1AutoRenew() {
 /** R1: unlock audio after play starts; auto-renew stream every 8s. */
 function scheduleR1AudioBoost() {
   if (runtimeEnv !== 'r1') return;
+  cancelR1BoostTimers();
+  state.userPaused = false;
   armR1AudioContinuePrompt();
   startR1AutoRenew();
   startR1LocalAudio();
-  setTimeout(() => startR1LocalAudio(), 500);
-  setTimeout(() => r1RenewPlaybackSession(), 8200);
+  r1BoostTimers.push(setTimeout(() => startR1LocalAudio(), 500));
+  r1BoostTimers.push(setTimeout(() => r1RenewPlaybackSession(), 8200));
 }
 
 function fixSpotifyEmbedIframe() {
@@ -1265,15 +1276,7 @@ async function syncNowPlayingFromApi() {
   }
 
   const apiProg = data.progress_ms || 0;
-  let playing = !!data.is_playing;
-  if (
-    runtimeEnv === 'r1' &&
-    !playing &&
-    state.lastApiProgressMs != null &&
-    apiProg > state.lastApiProgressMs + 700
-  ) {
-    playing = true;
-  }
+  const playing = state.userPaused ? false : !!data.is_playing;
   state.lastApiProgressMs = apiProg;
   state.isPlaying = playing;
 
@@ -1337,7 +1340,9 @@ async function startDefaultPlayback() {
 
 function handlePlayerStateChange(playerState) {
   const track = playerState.track_window?.current_track;
-  state.isPlaying = !playerState.paused;
+  if (!state.userPaused) {
+    state.isPlaying = !playerState.paused;
+  }
   state.progressMs = playerState.position;
   state.durationMs = playerState.duration;
 
@@ -1407,72 +1412,100 @@ async function togglePlay() {
 
   gestureActivateAudioSync();
   if (!(await ensurePlayerFromGesture())) return;
-  await preparePlaybackForUserAction();
 
-  const snap = await fetchPlayerSnapshot();
-  const playing = snap ? !!snap.is_playing : state.isPlaying;
-
-  if (!snap?.item && !state.currentTrack?.uri && !state.currentPlaylistTracks.length) {
-    const started = await startDefaultPlayback();
-    if (!started) showToast('Open ☰ and pick a playlist', 4000);
-    return;
+  let playing = null;
+  try {
+    const cur = await state.player.getCurrentState();
+    if (cur?.track_window?.current_track) {
+      playing = !cur.paused;
+    }
+  } catch (e) {
+    console.warn('getCurrentState:', e);
+  }
+  if (playing === null) {
+    const snap = await fetchPlayerSnapshot();
+    if (!snap?.item && !state.currentTrack?.uri && !state.currentPlaylistTracks.length) {
+      const started = await startDefaultPlayback();
+      if (!started) showToast('Open ☰ and pick a playlist', 4000);
+      return;
+    }
+    playing = snap ? !!snap.is_playing : state.isPlaying;
+  } else if (
+    !state.currentTrack?.uri &&
+    !state.currentPlaylistTracks.length
+  ) {
+    const snap = await fetchPlayerSnapshot();
+    if (!snap?.item) {
+      const started = await startDefaultPlayback();
+      if (!started) showToast('Open ☰ and pick a playlist', 4000);
+      return;
+    }
   }
 
   if (playing) {
+    state.userPaused = true;
+    state.isPlaying = false;
     hideR1AudioContinueHint();
     stopR1AutoRenew();
+    cancelR1BoostTimers();
+    if (r1AudioHintTimer) {
+      clearTimeout(r1AudioHintTimer);
+      r1AudioHintTimer = null;
+    }
     await apiPausePlayback();
     if (state.player) {
       try { await state.player.pause(); } catch (e) { /* ignore */ }
     }
-  } else {
-    // Same start path as Play All — apiResume alone does not start R1 audio.
-    let started = false;
-    let resumedOnly = false;
-    let cur = null;
-    try {
-      cur = await state.player.getCurrentState();
-    } catch (e) {
-      console.warn('getCurrentState:', e);
-    }
-    if (cur?.track_window?.current_track && cur.paused) {
-      try {
-        await state.player.resume();
-        started = true;
-        resumedOnly = true;
-      } catch (e) {
-        console.warn('resume:', e);
-      }
-    }
-    if (!started) {
-      if (state.currentPlaylistUri) {
-        const offset = state.currentPlaylistTracks.findIndex(
-          (t) => t.uri === state.currentTrack?.uri
-        );
-        started = await playContext(
-          state.currentPlaylistUri,
-          offset >= 0 ? offset : 0
-        );
-      } else if (state.currentPlaylistTracks.length > 0) {
-        const idx = state.currentPlaylistTracks.findIndex(
-          (t) => t.uri === state.currentTrack?.uri
-        );
-        started = await playTrackUris(
-          state.currentPlaylistTracks.map((t) => t.uri),
-          idx >= 0 ? idx : 0
-        );
-      } else if (state.currentTrack?.uri) {
-        started = await playTrackUris([state.currentTrack.uri], 0);
-      } else {
-        started = await startDefaultPlayback();
-      }
-    }
-    if (!started) {
-      showToast('Nothing to play — open ☰', 4000);
-      return;
-    }
-    if (resumedOnly) scheduleR1AudioBoost();
+    updatePlayButton();
+    return;
   }
+
+  state.userPaused = false;
+  await preparePlaybackForUserAction();
+
+  let started = false;
+  let cur = null;
+  try {
+    cur = await state.player.getCurrentState();
+  } catch (e) {
+    console.warn('getCurrentState:', e);
+  }
+  if (cur?.track_window?.current_track && cur.paused) {
+    try {
+      await state.player.resume();
+      started = true;
+    } catch (e) {
+      console.warn('resume:', e);
+    }
+  }
+  if (!started) {
+    if (state.currentPlaylistUri) {
+      const offset = state.currentPlaylistTracks.findIndex(
+        (t) => t.uri === state.currentTrack?.uri
+      );
+      started = await playContext(
+        state.currentPlaylistUri,
+        offset >= 0 ? offset : 0
+      );
+    } else if (state.currentPlaylistTracks.length > 0) {
+      const idx = state.currentPlaylistTracks.findIndex(
+        (t) => t.uri === state.currentTrack?.uri
+      );
+      started = await playTrackUris(
+        state.currentPlaylistTracks.map((t) => t.uri),
+        idx >= 0 ? idx : 0
+      );
+    } else if (state.currentTrack?.uri) {
+      started = await playTrackUris([state.currentTrack.uri], 0);
+    } else {
+      started = await startDefaultPlayback();
+    }
+  }
+  if (!started) {
+    showToast('Nothing to play — open ☰', 4000);
+    return;
+  }
+  scheduleR1AudioBoost();
   setTimeout(() => syncNowPlayingFromApi(), 400);
 }
 
@@ -1905,7 +1938,7 @@ function startProgressTimer() {
   stopR1AutoRenew();
   if (runtimeEnv === 'r1') {
     state.progressInterval = setInterval(() => {
-      if (state.isPlaying && state.durationMs > 0) {
+      if (state.isPlaying && !state.userPaused && state.durationMs > 0) {
         state.progressMs += 500;
         if (state.progressMs > state.durationMs) state.progressMs = state.durationMs;
         updateProgress();
