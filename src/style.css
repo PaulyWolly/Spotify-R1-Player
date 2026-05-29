@@ -178,6 +178,16 @@ html, body {
     margin-top: 0.5vh;
 }
 
+.pair-code {
+    font-size: 12vw;
+    font-weight: 800;
+    letter-spacing: 0.2em;
+    color: #fff;
+    text-align: center;
+    margin: 0.5vh 0 1vh;
+    font-family: monospace;
+}
+
 .helper-url {
     font-size: 3.2vw;
     color: #1DB954;

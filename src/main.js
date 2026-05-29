@@ -51,6 +51,8 @@ const state = {
   albumArtExpanded: false
 };
 
+let companionPollTimer = null;
+
 // ===========================================
 // Runtime environment (R1 vs browser)
 // ===========================================
@@ -167,16 +169,129 @@ function isCompanionAuthMode() {
   return true;
 }
 
-function getHelperLoginUrl() {
+function generateSessionCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+async function getOrCreateAuthSession() {
+  const storageKey = 'spotify_pair_session';
+  try {
+    const existing = sessionStorage.getItem(storageKey);
+    if (existing && /^\d{6}$/.test(existing)) return existing;
+  } catch (e) { /* ignore */ }
+  if (window.creationStorage) {
+    try {
+      const stored = await window.creationStorage.plain.getItem(storageKey);
+      if (stored && /^\d{6}$/.test(stored)) return stored;
+    } catch (e) { /* ignore */ }
+  }
+  const code = generateSessionCode();
+  try {
+    sessionStorage.setItem(storageKey, code);
+  } catch (e) { /* ignore */ }
+  if (window.creationStorage) {
+    try {
+      await window.creationStorage.plain.setItem(storageKey, code);
+    } catch (e) { /* ignore */ }
+  }
+  return code;
+}
+
+function getHelperLoginUrl(sessionId) {
   try {
     const u = new URL(SPOTIFY_REDIRECT_URI);
     u.search = '';
     u.hash = '';
     u.searchParams.set('helper', '1');
+    if (sessionId) u.searchParams.set('session', sessionId);
     return u.toString();
   } catch (e) {
-    return SPOTIFY_REDIRECT_URI.split('?')[0] + '?helper=1';
+    let url = SPOTIFY_REDIRECT_URI.split('?')[0] + '?helper=1';
+    if (sessionId) url += '&session=' + encodeURIComponent(sessionId);
+    return url;
   }
+}
+
+function stopCompanionPolling() {
+  if (companionPollTimer) {
+    clearInterval(companionPollTimer);
+    companionPollTimer = null;
+  }
+}
+
+async function applyTokenPayload(tokens) {
+  if (!tokens || !tokens.refreshToken) throw new Error('missing refresh token');
+  state.accessToken = tokens.accessToken || null;
+  state.refreshToken = tokens.refreshToken;
+  state.tokenExpiry = tokens.tokenExpiry || 0;
+  if (!state.accessToken || state.tokenExpiry - Date.now() < 60000) {
+    const ok = await refreshAccessToken();
+    if (!ok) throw new Error('token refresh failed');
+  }
+  await saveTokens();
+  showAuthStatus('');
+  initPlayer();
+  showView('player');
+  fetchPlaylists();
+  startProgressTimer();
+  bootDone();
+}
+
+async function pollAuthSession(sessionId) {
+  const url = '/.netlify/functions/auth-poll?session=' + encodeURIComponent(sessionId);
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.ok && data.tokens) {
+    stopCompanionPolling();
+    await applyTokenPayload(data.tokens);
+    return true;
+  }
+  if (data.error) {
+    showAuthStatus(data.error);
+  }
+  return false;
+}
+
+function startCompanionAuthPolling(sessionId) {
+  stopCompanionPolling();
+  showAuthStatus('Waiting for phone login…');
+  pollAuthSession(sessionId);
+  companionPollTimer = setInterval(function () {
+    pollAuthSession(sessionId);
+  }, 3000);
+}
+
+async function publishTokensToSession(sessionId) {
+  const res = await fetch('/.netlify/functions/auth-store', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session: sessionId,
+      tokens: {
+        accessToken: state.accessToken,
+        refreshToken: state.refreshToken,
+        tokenExpiry: state.tokenExpiry
+      }
+    })
+  });
+  if (!res.ok) {
+    let detail = 'Could not send login to R1';
+    try {
+      const err = await res.json();
+      if (err.error) detail = err.error;
+    } catch (e) { /* ignore */ }
+    throw new Error(detail);
+  }
+  return true;
+}
+
+async function startR1CompanionLogin() {
+  const sessionId = await getOrCreateAuthSession();
+  const pairEl = document.getElementById('pair-code');
+  const helperUrl = document.getElementById('helper-login-url');
+  if (pairEl) pairEl.textContent = sessionId;
+  if (helperUrl) helperUrl.textContent = getHelperLoginUrl(sessionId);
+  startCompanionAuthPolling(sessionId);
 }
 
 function createLoginKeyFromState() {
@@ -187,11 +302,31 @@ function createLoginKeyFromState() {
   }));
 }
 
+function showHelperSentView() {
+  clearHelperLoginFlag();
+  const exportView = document.getElementById('view-helper-export');
+  const title = document.getElementById('helper-export-title');
+  const msg = document.getElementById('helper-export-msg');
+  const ta = document.getElementById('login-key-export');
+  if (title) title.textContent = 'Sent to R1';
+  if (msg) msg.textContent = 'Login sent! Return to your R1 — it should connect in a few seconds. You can close this page.';
+  if (ta) ta.classList.add('hidden');
+  document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
+  if (exportView) exportView.classList.add('active');
+}
+
 function showHelperExportView(key) {
   clearHelperLoginFlag();
   const exportView = document.getElementById('view-helper-export');
+  const title = document.getElementById('helper-export-title');
+  const msg = document.getElementById('helper-export-msg');
   const ta = document.getElementById('login-key-export');
-  if (ta) ta.value = key;
+  if (title) title.textContent = 'Login key';
+  if (msg) msg.textContent = 'Copy ALL of this into your R1 app:';
+  if (ta) {
+    ta.value = key;
+    ta.classList.remove('hidden');
+  }
   document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
   if (exportView) exportView.classList.add('active');
 }
@@ -217,10 +352,10 @@ function configureAuthUIForEnv() {
 
   if (isCompanionAuthMode()) {
     if (btnConnect) btnConnect.classList.add('hidden');
-    if (btnImport) btnImport.classList.remove('hidden');
+    if (btnImport) btnImport.classList.add('hidden');
     if (webOnly) webOnly.classList.add('hidden');
     if (r1Panel) r1Panel.classList.remove('hidden');
-    if (helperUrl) helperUrl.textContent = getHelperLoginUrl();
+    startR1CompanionLogin();
     return;
   }
 
@@ -235,37 +370,7 @@ function configureAuthUIForEnv() {
 }
 
 async function importLoginKeyFromInput() {
-  const input = document.getElementById('login-key-input');
-  const raw = input && input.value ? input.value.trim() : '';
-  if (!raw) {
-    showAuthStatus('Paste the login key from your phone');
-    return;
-  }
-
-  showAuthStatus('Importing…');
-  try {
-    const data = JSON.parse(atob(raw));
-    if (!data.refreshToken) throw new Error('missing refresh token');
-    state.accessToken = data.accessToken || null;
-    state.refreshToken = data.refreshToken;
-    state.tokenExpiry = data.tokenExpiry || 0;
-    if (!state.accessToken || state.tokenExpiry - Date.now() < 60000) {
-      const ok = await refreshAccessToken();
-      if (!ok) throw new Error('token refresh failed');
-    }
-    await saveTokens();
-    showAuthStatus('');
-    initPlayer();
-    showView('player');
-    fetchPlaylists();
-    startProgressTimer();
-    bootDone();
-  } catch (e) {
-    const msg = 'Invalid key — log in on phone again and re-copy';
-    showAuthStatus(msg);
-    showToast(msg, 5000);
-    bootError(msg);
-  }
+  showAuthStatus('Use phone login — no paste needed');
 }
 
 // ===========================================
@@ -1317,6 +1422,7 @@ async function init() {
   const oauthError = urlParams.get('error');
 
   if (isHelperMode()) {
+    const pairSession = urlParams.get('session');
     const code = urlParams.get('code');
     if (code) {
       bootStatus('Finishing login…');
@@ -1334,6 +1440,16 @@ async function init() {
       state.tokenExpiry = tokens.tokenExpiry || 0;
       if (state.tokenExpiry - Date.now() < 60000) {
         await refreshAccessToken();
+      }
+      if (pairSession && /^\d{6}$/.test(pairSession)) {
+        try {
+          await publishTokensToSession(pairSession);
+          showHelperSentView();
+          bootDone();
+          return 'helper';
+        } catch (e) {
+          showAuthStatus(e.message || 'Could not send to R1');
+        }
       }
       showHelperExportView(createLoginKeyFromState());
       bootDone();

@@ -8,6 +8,9 @@
     "build": "vite build",
     "preview": "vite preview"
   },
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  },
   "devDependencies": {
     "@vitejs/plugin-basic-ssl": "^1.2.0",
     "vite": "^5.0.0"
