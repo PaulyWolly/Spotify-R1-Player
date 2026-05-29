@@ -63,6 +63,10 @@ let r1AudioKeepaliveInterval = null;
 let r1AutoRenewInterval = null;
 let r1AudioHintTimer = null;
 let r1BoostTimers = [];
+let r1AudioWatchdogInterval = null;
+let r1SilentAudioHold = null;
+let r1WakeLock = null;
+let r1LastGestureMs = 0;
 let cachedPairSession = null;
 let companionLoginStarted = false;
 
@@ -881,9 +885,70 @@ function initPlayer() {
   setupPlayer();
 }
 
-/** Must run synchronously inside tap/click — do not await before this on R1. */
-function gestureActivateAudioSync() {
+/** Near-silent loop — keeps Android WebView audio session open past ~10s. */
+function startR1SilentAudioHold() {
   if (runtimeEnv !== 'r1') return;
+  try {
+    if (r1SilentAudioHold?.ctx?.state === 'suspended') {
+      r1SilentAudioHold.ctx.resume().catch(() => {});
+      return;
+    }
+    if (r1SilentAudioHold) return;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const buffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+    const gain = ctx.createGain();
+    gain.gain.value = 0.0001;
+    source.connect(gain);
+    gain.connect(ctx.destination);
+    source.start(0);
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    r1SilentAudioHold = { ctx, source };
+  } catch (e) {
+    console.warn('startR1SilentAudioHold:', e);
+  }
+}
+
+function stopR1SilentAudioHold() {
+  if (!r1SilentAudioHold) return;
+  try {
+    r1SilentAudioHold.source.stop();
+    r1SilentAudioHold.ctx.close();
+  } catch (e) { /* ignore */ }
+  r1SilentAudioHold = null;
+}
+
+async function requestR1WakeLock() {
+  if (runtimeEnv !== 'r1' || !('wakeLock' in navigator)) return;
+  try {
+    if (r1WakeLock) return;
+    r1WakeLock = await navigator.wakeLock.request('screen');
+    r1WakeLock.addEventListener('release', () => {
+      r1WakeLock = null;
+    });
+  } catch (e) {
+    console.warn('wakeLock:', e);
+  }
+}
+
+function releaseR1WakeLock() {
+  if (!r1WakeLock) return;
+  try {
+    r1WakeLock.release();
+  } catch (e) { /* ignore */ }
+  r1WakeLock = null;
+}
+
+/** Sync part — must run inside tap/scroll (user gesture). */
+function extendR1AudioSessionSync() {
+  if (runtimeEnv !== 'r1') return;
+  r1LastGestureMs = Date.now();
+  startR1SilentAudioHold();
+  hideR1AudioContinueHint();
   if (!state.player) {
     state._pendingAudioGesture = true;
     return;
@@ -895,8 +960,19 @@ function gestureActivateAudioSync() {
     }
     state.audioUnlocked = true;
   } catch (e) {
-    console.warn('gestureActivateAudioSync:', e);
+    console.warn('extendR1AudioSessionSync:', e);
   }
+}
+
+/** Must run synchronously inside tap/click — do not await before this on R1. */
+function gestureActivateAudioSync() {
+  extendR1AudioSessionSync();
+}
+
+async function extendR1AudioSession() {
+  extendR1AudioSessionSync();
+  await forceUnlockR1Audio();
+  requestR1WakeLock();
 }
 
 function showR1AudioContinueHint() {
@@ -909,16 +985,24 @@ function hideR1AudioContinueHint() {
   if (el) el.classList.add('hidden');
 }
 
-function armR1AudioContinuePrompt() {
+function startR1AudioWatchdog() {
+  stopR1AudioWatchdog();
   if (runtimeEnv !== 'r1') return;
-  if (r1AudioHintTimer) clearTimeout(r1AudioHintTimer);
-  hideR1AudioContinueHint();
-  r1AudioHintTimer = setTimeout(() => {
+  r1AudioWatchdogInterval = setInterval(() => {
+    if (!state.isPlaying || state.userPaused || state.currentView !== 'player') return;
+    if (Date.now() - r1LastGestureMs > 6500) showR1AudioContinueHint();
+  }, 2000);
+}
+
+function stopR1AudioWatchdog() {
+  if (r1AudioWatchdogInterval) {
+    clearInterval(r1AudioWatchdogInterval);
+    r1AudioWatchdogInterval = null;
+  }
+  if (r1AudioHintTimer) {
+    clearTimeout(r1AudioHintTimer);
     r1AudioHintTimer = null;
-    if (state.isPlaying && state.currentView === 'player') {
-      showR1AudioContinueHint();
-    }
-  }, 6000);
+  }
 }
 
 /**
@@ -977,11 +1061,15 @@ function stopR1AutoRenew() {
   }
 }
 
-/** R1: unlock audio after play starts (no auto stream restart — that caused loops). */
+/** R1: unlock audio after play starts (no stream restart). */
 function scheduleR1AudioBoost() {
   if (runtimeEnv !== 'r1') return;
   cancelR1BoostTimers();
   state.userPaused = false;
+  r1LastGestureMs = Date.now();
+  startR1SilentAudioHold();
+  requestR1WakeLock();
+  startR1AudioWatchdog();
   startR1LocalAudio();
   r1BoostTimers.push(setTimeout(() => startR1LocalAudio(), 500));
 }
@@ -991,8 +1079,8 @@ function fixSpotifyEmbedIframe() {
   if (!iframe) return;
   iframe.setAttribute('allow', 'encrypted-media *; autoplay *');
   iframe.style.cssText =
-    'display:block!important;position:absolute;width:1px;height:1px;opacity:0;' +
-    'pointer-events:none;left:0;top:0;border:0;';
+    'display:block!important;position:fixed;width:2px;height:2px;opacity:0.01;' +
+    'pointer-events:none;left:0;top:0;border:0;z-index:0;';
 }
 
 async function reconnectSpotifyPlayer() {
@@ -1014,12 +1102,13 @@ async function reconnectSpotifyPlayer() {
 async function recoverR1Audio() {
   if (runtimeEnv !== 'r1' || !state.player) return;
   fixSpotifyEmbedIframe();
-  gestureActivateAudioSync();
-  await forceUnlockR1Audio();
+  await extendR1AudioSession();
   if (!state.deviceId) await reconnectSpotifyPlayer();
   try {
     const cur = await state.player.getCurrentState();
-    if (cur?.paused) await state.player.resume();
+    if (cur?.paused && state.isPlaying && !state.userPaused) {
+      await state.player.resume();
+    }
   } catch (e) {
     console.warn('recoverR1Audio:', e);
   }
@@ -1127,7 +1216,7 @@ function installR1AudioUnlock() {
   if (runtimeEnv !== 'r1' || state._r1UnlockInstalled) return;
   state._r1UnlockInstalled = true;
   const onGesture = () => {
-    gestureActivateAudioSync();
+    extendR1AudioSessionSync();
   };
   document.addEventListener('click', onGesture, true);
   document.addEventListener('touchstart', onGesture, { capture: true, passive: true });
@@ -1475,11 +1564,14 @@ async function togglePlay() {
       updatePlayButton();
       scheduleR1AudioBoost();
     } else {
-      state.userPaused = true;
-      state.isPlaying = false;
-      hideR1AudioContinueHint();
-      stopR1AutoRenew();
-      cancelR1BoostTimers();
+    state.userPaused = true;
+    state.isPlaying = false;
+    hideR1AudioContinueHint();
+    stopR1AutoRenew();
+    stopR1AudioWatchdog();
+    stopR1SilentAudioHold();
+    releaseR1WakeLock();
+    cancelR1BoostTimers();
       if (r1AudioHintTimer) {
         clearTimeout(r1AudioHintTimer);
         r1AudioHintTimer = null;
@@ -1957,10 +2049,13 @@ function startR1AudioKeepalive() {
   if (r1AudioKeepaliveInterval) clearInterval(r1AudioKeepaliveInterval);
   if (runtimeEnv !== 'r1') return;
   r1AudioKeepaliveInterval = setInterval(() => {
-    if (!state.isPlaying || !state.player) return;
-    unlockWebAudio(true).catch(() => {});
+    if (!state.isPlaying || state.userPaused || !state.player) return;
+    startR1SilentAudioHold();
+    if (r1SilentAudioHold?.ctx?.state === 'suspended') {
+      r1SilentAudioHold.ctx.resume().catch(() => {});
+    }
     state.player.setVolume(1).catch(() => {});
-  }, 3000);
+  }, 2500);
 }
 
 function startProgressTimer() {
@@ -1968,6 +2063,7 @@ function startProgressTimer() {
   if (r1ApiSyncInterval) clearInterval(r1ApiSyncInterval);
   if (r1AudioKeepaliveInterval) clearInterval(r1AudioKeepaliveInterval);
   stopR1AutoRenew();
+  stopR1AudioWatchdog();
   if (runtimeEnv === 'r1') {
     state.progressInterval = setInterval(() => {
       if (state.isPlaying && !state.userPaused && state.durationMs > 0) {
@@ -2216,16 +2312,13 @@ window.addEventListener('scrollDown', () => {
 });
 
 window.addEventListener('sideClick', () => {
-  gestureActivateAudioSync();
-  if (state.currentView === 'player') {
-    const hint = document.getElementById('r1-audio-hint');
-    if (hint && !hint.classList.contains('hidden')) {
-      hideR1AudioContinueHint();
-      recoverR1Audio();
-      return;
-    }
-    togglePlay();
+  if (state.currentView !== 'player') return;
+  extendR1AudioSessionSync();
+  if (state.isPlaying && !state.userPaused) {
+    recoverR1Audio();
+    return;
   }
+  togglePlay();
 });
 
 window.addEventListener('longPressStart', () => {
@@ -2422,7 +2515,7 @@ function wireControls() {
   const r1AudioHint = document.getElementById('r1-audio-hint');
   if (r1AudioHint) {
     bindTap(r1AudioHint, () => {
-      hideR1AudioContinueHint();
+      extendR1AudioSessionSync();
       recoverR1Audio();
     });
   }

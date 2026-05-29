@@ -39,7 +39,7 @@
     <!-- Dead-simple boot diagnostic. Plain block flow, no fixed/inset CSS so
          even old WebViews render it. main.js removes it once the app starts. -->
     <div id="boot-fallback" style="background:#111;color:#1DB954;font-family:monospace;font-size:12px;line-height:1.5;padding:10px;min-height:100vh;box-sizing:border-box;word-break:break-word;">
-        <div style="font-size:16px;font-weight:bold;color:#ffffff;">HTML OK — build v38</div>
+        <div style="font-size:16px;font-weight:bold;color:#ffffff;">HTML OK — build v39</div>
         <div id="boot-msg" style="margin-top:6px;color:#1DB954;">starting…</div>
         <div style="margin-top:8px;color:#888888;">Browser:</div>
         <div id="boot-ua" style="color:#cccccc;"></div>
@@ -100,8 +100,8 @@
                     <span id="time-current">0:00</span>
                     <span id="time-total">0:00</span>
                 </div>
-                <button type="button" id="r1-audio-hint" class="r1-audio-hint hidden" aria-label="Tap to restart audio">
-                    Tap to restart audio
+                <button type="button" id="r1-audio-hint" class="r1-audio-hint hidden" aria-label="Keep audio playing">
+                    Tap here or press scroll to keep audio
                 </button>
                 <div class="controls">
                     <div class="controls-spacer">
@@ -117,7 +117,7 @@
                     <div class="controls-side">
                         <span class="playback-status" id="playback-status"></span>
                         <button class="info-btn" id="btn-info" type="button" aria-label="Show controls help" aria-expanded="false">i</button>
-                        <div class="nav-hint" id="nav-hint" role="tooltip">⏮ first • ⏪ prev • ⏩ next • ⏭ last • ☰ songs<br>♫ tap: current list's songs</div>
+                        <div class="nav-hint" id="nav-hint" role="tooltip">⏮ first • ⏪ prev • ⏩ next • ⏭ last • ☰ songs<br>♫ tap: song list • scroll: keep audio</div>
                     </div>
                 </div>
             </div>
