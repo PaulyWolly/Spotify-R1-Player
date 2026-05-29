@@ -473,19 +473,20 @@ html, body {
 }
 
 .env-r1 .player-container {
-    padding-left: 2vw;
-    padding-right: 2vw;
+    padding-left: 1vw;
+    padding-right: 1vw;
 }
 
+/* Pack ☰ transport ♫ (i) as one tight row — avoid space-between gaps */
 .env-r1 .controls {
     display: flex;
     flex-direction: row;
     align-items: center;
-    justify-content: space-between;
+    justify-content: center;
     width: 100%;
     max-width: 100%;
     box-sizing: border-box;
-    gap: 0;
+    gap: 2px;
 }
 
 .env-r1 .controls-spacer,
@@ -493,67 +494,76 @@ html, body {
 .env-r1 .controls-side {
     display: flex;
     align-items: center;
-}
-
-.env-r1 .controls-spacer {
     flex: 0 0 auto;
 }
 
 .env-r1 .controls-main {
-    flex: 0 0 auto;
     gap: 0;
     margin: 0;
 }
 
 .env-r1 .controls-side {
-    flex: 0 0 auto;
-    gap: 1px;
+    gap: 0;
     padding: 0;
-    max-width: 36px;
+    margin: 0;
+    min-width: 0;
 }
 
 .env-r1 #btn-play.ctrl-play,
 .env-r1 .ctrl-play {
-    width: 30px;
-    height: 30px;
-    min-width: 30px;
-    min-height: 30px;
-    font-size: 14px;
-    margin: 0 1px;
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    min-height: 28px;
+    font-size: 13px;
+    margin: 0;
+    padding-left: 1px;
+    padding-bottom: 0;
 }
 
 .env-r1 .ctrl-first,
 .env-r1 .ctrl-prev,
 .env-r1 .ctrl-next,
 .env-r1 .ctrl-last {
-    width: 17px;
-    min-width: 17px;
-    max-width: 17px;
-    height: 22px;
-    min-height: 22px;
-    font-size: 12px;
+    width: 15px;
+    min-width: 15px;
+    max-width: 15px;
+    height: 20px;
+    min-height: 20px;
+    font-size: 11px;
     padding: 0;
     margin: 0;
 }
 
 .env-r1 .ctrl-library {
-    width: 22px;
-    height: 22px;
-    min-width: 22px;
-    min-height: 22px;
-    font-size: 11px;
+    width: 20px;
+    height: 20px;
+    min-width: 20px;
+    min-height: 20px;
+    font-size: 10px;
+    border-width: 1px;
 }
 
 .env-r1 .playback-status {
-    font-size: 12px;
+    font-size: 11px;
     line-height: 1;
-    width: 14px;
-    max-width: 14px;
+    width: 0;
+    max-width: 0;
     padding: 0;
     margin: 0;
     overflow: hidden;
     text-align: center;
     flex-shrink: 0;
+}
+
+.env-r1 .playback-status:not(:empty) {
+    width: 12px;
+    max-width: 12px;
+    margin-right: 1px;
+}
+
+.env-r1 .playback-status.tappable {
+    text-decoration: none;
 }
 
 .env-r1 .play-all-btn {
@@ -562,11 +572,11 @@ html, body {
 }
 
 .env-r1 .info-btn {
-    width: 18px;
-    height: 18px;
-    min-width: 18px;
-    min-height: 18px;
-    font-size: 11px;
+    width: 16px;
+    height: 16px;
+    min-width: 16px;
+    min-height: 16px;
+    font-size: 10px;
     margin: 0;
     flex-shrink: 0;
 }
