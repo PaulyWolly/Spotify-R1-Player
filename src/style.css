@@ -284,23 +284,14 @@ html, body {
     font-size: 3.4vw;
 }
 
-/* Keep play button finger-sized even when album art is expanded */
 .player-container.art-expanded .ctrl-play {
-    width: 64px;
-    height: 64px;
-    min-width: 64px;
-    min-height: 64px;
-    font-size: 28px;
-    padding-left: 3px;
-    padding-bottom: 2px;
-}
-
-.env-r1 .player-container.art-expanded .ctrl-play {
-    width: 36px;
-    height: 36px;
-    min-width: 36px;
-    min-height: 36px;
-    font-size: 16px;
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    min-height: 38px;
+    font-size: 17px;
+    padding-left: 2px;
+    padding-bottom: 1px;
 }
 
 .player-container.art-expanded .ctrl-library {
@@ -392,8 +383,9 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 1.5vw;
-    flex-shrink: 0;
+    gap: 1vw;
+    flex-shrink: 1;
+    min-width: 0;
 }
 
 .controls-side {
@@ -433,21 +425,21 @@ html, body {
     opacity: 0.6;
 }
 
-/* Fixed px — vw was ~10px on 240px wide R1 and was unusable */
+/* 240px-wide UI — keep transport row compact so (i) stays visible */
 #btn-play.ctrl-play,
 .ctrl-play {
-    width: 64px;
-    height: 64px;
-    min-width: 64px;
-    min-height: 64px;
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    min-height: 38px;
     background: #1DB954;
     border-radius: 50%;
     color: #000;
-    font-size: 28px;
+    font-size: 17px;
     line-height: 1;
     padding: 0;
-    padding-left: 3px;
-    padding-bottom: 2px;
+    padding-left: 2px;
+    padding-bottom: 1px;
     flex-shrink: 0;
     box-sizing: border-box;
 }
@@ -477,26 +469,54 @@ html, body {
     background: #1aa34a;
 }
 
-/* R1: finger-sized but not huge (50% of prior 72px) */
+.env-r1 .controls {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    column-gap: 0;
+}
+
+.env-r1 .controls-main {
+    gap: 2px;
+    flex-shrink: 1;
+}
+
+.env-r1 .controls-side {
+    gap: 1vw;
+    padding-right: 0.5vw;
+    flex-shrink: 0;
+}
+
 .env-r1 #btn-play.ctrl-play,
 .env-r1 .ctrl-play {
-    width: 36px;
-    height: 36px;
-    min-width: 36px;
-    min-height: 36px;
-    font-size: 16px;
-    padding-left: 2px;
-    padding-bottom: 1px;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    min-height: 32px;
+    font-size: 15px;
 }
 
 .env-r1 .ctrl-btn {
-    min-width: 28px;
-    min-height: 28px;
+    min-width: 20px;
+    min-height: 20px;
+    font-size: 3.2vw;
+    padding: 0;
 }
 
 .env-r1 .ctrl-library {
-    min-width: 32px;
-    min-height: 32px;
+    width: 6.5vw;
+    height: 6.5vw;
+    min-width: 20px;
+    min-height: 20px;
+}
+
+.env-r1 .playback-status {
+    max-width: 10vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.env-r1 .info-btn {
+    margin-left: 0;
 }
 
 .info-btn {
