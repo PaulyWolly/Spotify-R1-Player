@@ -340,29 +340,44 @@ function stopCompanionPolling() {
   }
 }
 
-async function applyTokenPayload(tokens) {
-  if (!tokens || !tokens.refreshToken) throw new Error('missing refresh token');
+/** If we already have a refresh token locally, go straight to the player. */
+async function tryResumeStoredSession() {
+  const tokens = await loadTokens();
+  if (!tokens?.refreshToken) return false;
+
   state.accessToken = tokens.accessToken || null;
   state.refreshToken = tokens.refreshToken;
   state.tokenExpiry = tokens.tokenExpiry || 0;
+
   if (!state.accessToken || state.tokenExpiry - Date.now() < 60000) {
-    const ok = await refreshAccessToken();
-    if (!ok) throw new Error('token refresh failed — log in on phone again');
+    await refreshAccessToken();
   }
+  if (!state.refreshToken) return false;
+
+  stopCompanionPolling();
+  state.userPaused = false;
+  showView('player');
+  bootDone();
+  if (!state.player) initPlayer();
+  installR1AudioUnlock();
+  fetchPlaylists();
+  if (!state.progressInterval) startProgressTimer();
+  return true;
+}
+
+async function applyTokenPayload(tokens) {
+  if (!tokens?.refreshToken) throw new Error('missing refresh token');
+  state.accessToken = tokens.accessToken || null;
+  state.refreshToken = tokens.refreshToken;
+  state.tokenExpiry = tokens.tokenExpiry || 0;
   await saveTokens();
   stopCompanionPolling();
   showAuthStatus('Connected!');
-  showView('player');
-  bootDone();
-  try {
-    initPlayer();
-    installR1AudioUnlock();
-    fetchPlaylists();
-    startProgressTimer();
-  } catch (e) {
-    console.error('applyTokenPayload player:', e);
-    showToast('Logged in — tap a song to play', 4000);
+  if (!state.accessToken || state.tokenExpiry - Date.now() < 60000) {
+    await refreshAccessToken();
   }
+  await saveTokens();
+  await tryResumeStoredSession();
 }
 
 async function pollAuthSession(sessionId) {
@@ -375,8 +390,13 @@ async function pollAuthSession(sessionId) {
     }
     const data = await res.json();
     if (data.ok && data.tokens) {
-      await applyTokenPayload(data.tokens);
-      return true;
+      try {
+        await applyTokenPayload(data.tokens);
+        return true;
+      } catch (e) {
+        showAuthStatus(e.message || 'Login failed');
+        return false;
+      }
     }
     if (data.error) showAuthStatus(data.error);
     return false;
@@ -445,7 +465,7 @@ async function publishTokensToSession(sessionId) {
 
 async function startR1CompanionLogin() {
   companionLoginStarted = true;
-  const sessionId = await createFreshAuthSession();
+  const sessionId = await getOrCreateAuthSession();
   const pairEl = document.getElementById('pair-code');
   const helperUrl = document.getElementById('helper-login-url');
   if (pairEl) pairEl.textContent = sessionId;
@@ -490,7 +510,7 @@ function showHelperExportView(key) {
   if (exportView) exportView.classList.add('active');
 }
 
-function configureAuthUIForEnv() {
+async function configureAuthUIForEnv() {
   const btnConnect = document.getElementById('btn-connect');
   const btnImport = document.getElementById('btn-import-key');
   const webOnly = document.getElementById('auth-web-only');
@@ -514,7 +534,8 @@ function configureAuthUIForEnv() {
     if (btnImport) btnImport.classList.add('hidden');
     if (webOnly) webOnly.classList.add('hidden');
     if (r1Panel) r1Panel.classList.remove('hidden');
-    startR1CompanionLogin();
+    if (await tryResumeStoredSession()) return;
+    await startR1CompanionLogin();
     return;
   }
 
@@ -949,14 +970,6 @@ async function r1RenewPlaybackSession() {
   return true;
 }
 
-function startR1AutoRenew() {
-  stopR1AutoRenew();
-  if (runtimeEnv !== 'r1') return;
-  r1AutoRenewInterval = setInterval(() => {
-    if (state.isPlaying && !state.userPaused) r1RenewPlaybackSession();
-  }, 8000);
-}
-
 function stopR1AutoRenew() {
   if (r1AutoRenewInterval) {
     clearInterval(r1AutoRenewInterval);
@@ -964,16 +977,13 @@ function stopR1AutoRenew() {
   }
 }
 
-/** R1: unlock audio after play starts; auto-renew stream every 8s. */
+/** R1: unlock audio after play starts (no auto stream restart — that caused loops). */
 function scheduleR1AudioBoost() {
   if (runtimeEnv !== 'r1') return;
   cancelR1BoostTimers();
   state.userPaused = false;
-  armR1AudioContinuePrompt();
-  startR1AutoRenew();
   startR1LocalAudio();
   r1BoostTimers.push(setTimeout(() => startR1LocalAudio(), 500));
-  r1BoostTimers.push(setTimeout(() => r1RenewPlaybackSession(), 8200));
 }
 
 function fixSpotifyEmbedIframe() {
@@ -1000,21 +1010,18 @@ async function reconnectSpotifyPlayer() {
   }
 }
 
-/** Re-unlock WebView audio and re-start the stream (R1 drops output after ~10s). */
+/** Re-unlock WebView audio without restarting the track (avoids playback_error loops). */
 async function recoverR1Audio() {
   if (runtimeEnv !== 'r1' || !state.player) return;
   fixSpotifyEmbedIframe();
   gestureActivateAudioSync();
+  await forceUnlockR1Audio();
   if (!state.deviceId) await reconnectSpotifyPlayer();
-  const renewed = await r1RenewPlaybackSession();
-  if (!renewed) {
-    await forceUnlockR1Audio();
-    try {
-      const snap = await fetchPlayerSnapshot();
-      if (snap?.is_playing) await resumeLocalPlayback();
-    } catch (e) {
-      console.warn('recoverR1Audio:', e);
-    }
+  try {
+    const cur = await state.player.getCurrentState();
+    if (cur?.paused) await state.player.resume();
+  } catch (e) {
+    console.warn('recoverR1Audio:', e);
   }
 }
 
@@ -1196,12 +1203,7 @@ async function setupPlayer() {
     console.log('Device offline:', device_id);
     state.audioUnlocked = false;
     if (runtimeEnv === 'r1') {
-      showToast('Audio connection lost — tap ▶', 4500);
-      setTimeout(() => {
-        reconnectSpotifyPlayer().then((ok) => {
-          if (ok) recoverR1Audio();
-        });
-      }, 400);
+      setTimeout(() => reconnectSpotifyPlayer(), 400);
     }
   });
 
@@ -1250,14 +1252,11 @@ async function setupPlayer() {
   player.addListener('playback_error', ({ message }) => {
     console.error('Playback error:', message);
     if (Date.now() < state.playbackErrorMuteUntil) return;
-    state.playbackErrorMuteUntil = Date.now() + 8000;
-    const msg = String(message || '');
-    let hint = msg.slice(0, 72) || 'Playback error';
-    if (runtimeEnv === 'r1') {
-      hint = 'Audio hiccup — tap ▶ or scroll. Close Spotify on PC.';
-      recoverR1Audio();
+    state.playbackErrorMuteUntil = Date.now() + 20000;
+    if (runtimeEnv !== 'r1') {
+      const msg = String(message || '').slice(0, 72) || 'Playback error';
+      showToast(msg, 4000);
     }
-    showToast(hint, 6000);
   });
 
   state.player = player;
@@ -2222,8 +2221,7 @@ window.addEventListener('sideClick', () => {
     const hint = document.getElementById('r1-audio-hint');
     if (hint && !hint.classList.contains('hidden')) {
       hideR1AudioContinueHint();
-      r1RenewPlaybackSession();
-      armR1AudioContinuePrompt();
+      recoverR1Audio();
       return;
     }
     togglePlay();
@@ -2259,7 +2257,7 @@ async function init() {
       const success = await handleAuthCallback(code);
       if (!success) {
         showView('auth');
-        configureAuthUIForEnv();
+        await configureAuthUIForEnv();
         return 'error';
       }
     }
@@ -2290,7 +2288,7 @@ async function init() {
       return 'helper';
     }
     showView('auth');
-    configureAuthUIForEnv();
+    await configureAuthUIForEnv();
     return 'auth';
   }
 
@@ -2298,7 +2296,7 @@ async function init() {
     const msg = 'Spotify login cancelled: ' + oauthError;
     showAuthStatus(msg);
     showView('auth');
-    configureAuthUIForEnv();
+    await configureAuthUIForEnv();
     window.history.replaceState({}, document.title, SPOTIFY_REDIRECT_URI);
     bootError(msg);
     return 'error';
@@ -2318,38 +2316,19 @@ async function init() {
       return 'player';
     }
     showView('auth');
-    configureAuthUIForEnv();
+    await configureAuthUIForEnv();
     const btn = document.getElementById('btn-connect');
     if (btn) btn.disabled = false;
     return 'error';
   }
 
-  const tokens = await loadTokens();
-  if (tokens?.accessToken && tokens?.refreshToken) {
-    stopCompanionPolling();
-    state.accessToken = tokens.accessToken;
-    state.refreshToken = tokens.refreshToken;
-    state.tokenExpiry = tokens.tokenExpiry || 0;
-
-    const tokenValid = state.tokenExpiry - Date.now() > 60000;
-    const sessionOk = tokenValid || (await refreshAccessToken());
-    if (sessionOk && state.accessToken) {
-      showView('player');
-      bootDone();
-      initPlayer();
-      installR1AudioUnlock();
-      fetchPlaylists();
-      startProgressTimer();
-      return 'player';
-    }
-    await clearTokens();
-    companionLoginStarted = false;
-    showAuthStatus('Session expired — log in on phone again');
+  if (await tryResumeStoredSession()) {
+    return 'player';
   }
 
   showView('auth');
   companionLoginStarted = false;
-  configureAuthUIForEnv();
+  await configureAuthUIForEnv();
   console.info(`[Spotify R1] env=${runtimeEnv} — Redirect URI:`, SPOTIFY_REDIRECT_URI);
   return 'auth';
 }
@@ -2444,8 +2423,7 @@ function wireControls() {
   if (r1AudioHint) {
     bindTap(r1AudioHint, () => {
       hideR1AudioContinueHint();
-      r1RenewPlaybackSession();
-      armR1AudioContinuePrompt();
+      recoverR1Audio();
     });
   }
 
