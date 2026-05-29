@@ -50,6 +50,7 @@ const state = {
   progressInterval: null,
   albumArtExpanded: false,
   audioUnlocked: false,
+  _pendingAudioGesture: false,
   activeDeviceId: null,
   playbackErrorMuteUntil: 0,
   lastApiProgressMs: null
@@ -822,7 +823,11 @@ function initPlayer() {
 
 /** Must run synchronously inside tap/click — do not await before this on R1. */
 function gestureActivateAudioSync() {
-  if (runtimeEnv !== 'r1' || !state.player) return;
+  if (runtimeEnv !== 'r1') return;
+  if (!state.player) {
+    state._pendingAudioGesture = true;
+    return;
+  }
   try {
     if (typeof state.player.activateElement === 'function') {
       const p = state.player.activateElement();
@@ -832,6 +837,16 @@ function gestureActivateAudioSync() {
   } catch (e) {
     console.warn('gestureActivateAudioSync:', e);
   }
+}
+
+/** R1: re-unlock audio several times right after starting playback (WebView drops ~10s). */
+function scheduleR1AudioBoost() {
+  if (runtimeEnv !== 'r1') return;
+  startR1LocalAudio();
+  setTimeout(() => startR1LocalAudio(), 400);
+  setTimeout(() => startR1LocalAudio(), 1500);
+  setTimeout(() => startR1LocalAudio(), 3500);
+  setTimeout(() => startR1LocalAudio(), 8000);
 }
 
 function fixSpotifyEmbedIframe() {
@@ -905,7 +920,7 @@ async function ensurePlayerFromGesture() {
     return false;
   }
 
-  await unlockWebAudio();
+  await unlockWebAudio(runtimeEnv === 'r1');
   const ready = await waitForDevice(runtimeEnv === 'r1' ? 25000 : 12000);
   if (!ready) showToast('Connecting player… tap again', 4000);
   return ready;
@@ -1040,6 +1055,11 @@ async function setupPlayer() {
     fixSpotifyEmbedIframe();
     syncNowPlayingFromApi();
     if (runtimeEnv === 'r1') {
+      if (state._pendingAudioGesture) {
+        state._pendingAudioGesture = false;
+        gestureActivateAudioSync();
+        forceUnlockR1Audio().catch(() => {});
+      }
       showToast('Pick a song, then tap ▶ on R1', 3500);
     }
   });
@@ -1321,19 +1341,52 @@ async function togglePlay() {
       try { await state.player.pause(); } catch (e) { /* ignore */ }
     }
   } else {
-    const ok = await apiResumePlayback();
-    if (!ok && state.currentPlaylistTracks.length > 0) {
-      await playTrackUris(state.currentPlaylistTracks.map((t) => t.uri), 0);
-    } else if (!ok && state.currentTrack?.uri) {
-      await playTrackUris([state.currentTrack.uri], 0);
-    } else if (!ok) {
+    // Same start path as Play All — apiResume alone does not start R1 audio.
+    let started = false;
+    let resumedOnly = false;
+    let cur = null;
+    try {
+      cur = await state.player.getCurrentState();
+    } catch (e) {
+      console.warn('getCurrentState:', e);
+    }
+    if (cur?.track_window?.current_track && cur.paused) {
+      try {
+        await state.player.resume();
+        started = true;
+        resumedOnly = true;
+      } catch (e) {
+        console.warn('resume:', e);
+      }
+    }
+    if (!started) {
+      if (state.currentPlaylistUri) {
+        const offset = state.currentPlaylistTracks.findIndex(
+          (t) => t.uri === state.currentTrack?.uri
+        );
+        started = await playContext(
+          state.currentPlaylistUri,
+          offset >= 0 ? offset : 0
+        );
+      } else if (state.currentPlaylistTracks.length > 0) {
+        const idx = state.currentPlaylistTracks.findIndex(
+          (t) => t.uri === state.currentTrack?.uri
+        );
+        started = await playTrackUris(
+          state.currentPlaylistTracks.map((t) => t.uri),
+          idx >= 0 ? idx : 0
+        );
+      } else if (state.currentTrack?.uri) {
+        started = await playTrackUris([state.currentTrack.uri], 0);
+      } else {
+        started = await startDefaultPlayback();
+      }
+    }
+    if (!started) {
       showToast('Nothing to play — open ☰', 4000);
       return;
     }
-    await startR1LocalAudio();
-    if (state.player) {
-      try { await state.player.resume(); } catch (e) { /* ignore */ }
-    }
+    if (resumedOnly) scheduleR1AudioBoost();
   }
   setTimeout(() => syncNowPlayingFromApi(), 400);
 }
@@ -1350,7 +1403,7 @@ async function nextTrack() {
   if (result?._error && state.player) {
     try { await state.player.nextTrack(); } catch (e) { /* ignore */ }
   }
-  await startR1LocalAudio();
+  scheduleR1AudioBoost();
 }
 
 async function prevTrack() {
@@ -1365,7 +1418,7 @@ async function prevTrack() {
   if (result?._error && state.player) {
     try { await state.player.previousTrack(); } catch (e) { /* ignore */ }
   }
-  await startR1LocalAudio();
+  scheduleR1AudioBoost();
 }
 
 /** |◀◀ — jump to the start of the current playlist/list. */
@@ -1393,6 +1446,7 @@ async function lastTrack() {
 
 /** Play every track in the currently open playlist, from the top. */
 async function playAllCurrent() {
+  gestureActivateAudioSync();
   if (state.currentPlaylistUri) {
     const ok = await playContext(state.currentPlaylistUri, 0);
     if (ok) {
@@ -1438,7 +1492,7 @@ async function playContext(contextUri, offset = 0) {
     return false;
   }
   syncNowPlayingFromApi();
-  if (runtimeEnv === 'r1') await startR1LocalAudio();
+  if (runtimeEnv === 'r1') scheduleR1AudioBoost();
   return true;
 }
 
@@ -1475,7 +1529,7 @@ async function playTrackUris(uris, offset = 0) {
     updatePlayerUI();
   }
   syncNowPlayingFromApi();
-  if (runtimeEnv === 'r1') await startR1LocalAudio();
+  if (runtimeEnv === 'r1') scheduleR1AudioBoost();
   return true;
 }
 
@@ -1754,7 +1808,8 @@ function startR1AudioKeepalive() {
     if (!state.isPlaying || !state.player) return;
     gestureActivateAudioSync();
     unlockWebAudio(true).catch(() => {});
-  }, 4000);
+    state.player.setVolume(1).catch(() => {});
+  }, 2500);
 }
 
 function startProgressTimer() {
