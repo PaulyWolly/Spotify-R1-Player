@@ -219,6 +219,32 @@ html, body {
     box-sizing: border-box;
 }
 
+/* Shown ~7s into playback when R1 WebView is about to drop audio */
+.r1-audio-hint {
+    display: block;
+    width: 92%;
+    margin: 0 auto 1vh;
+    padding: 1.2vh 2vw;
+    border: 1px solid #1DB954;
+    border-radius: 2vw;
+    background: rgba(29, 185, 84, 0.15);
+    color: #1DB954;
+    font-size: 3.2vw;
+    font-weight: 600;
+    text-align: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.r1-audio-hint.hidden {
+    display: none;
+}
+
+.env-browser .r1-audio-hint {
+    display: none !important;
+}
+
 /* Player Screen */
 .player-container {
     display: flex;

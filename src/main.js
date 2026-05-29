@@ -59,6 +59,11 @@ const state = {
 let companionPollTimer = null;
 let r1ApiSyncInterval = null;
 let r1AudioKeepaliveInterval = null;
+let r1StreamRefreshInterval = null;
+let r1AudioHintTimer = null;
+/** Holds WebView audio session open (stops ~10s cutout on Android WebViews). */
+let r1SilentAudioHold = null;
+let r1WakeLock = null;
 let cachedPairSession = null;
 let companionLoginStarted = false;
 
@@ -824,6 +829,8 @@ function initPlayer() {
 /** Must run synchronously inside tap/click — do not await before this on R1. */
 function gestureActivateAudioSync() {
   if (runtimeEnv !== 'r1') return;
+  startR1SilentAudioHold();
+  requestR1WakeLock();
   if (!state.player) {
     state._pendingAudioGesture = true;
     return;
@@ -839,14 +846,119 @@ function gestureActivateAudioSync() {
   }
 }
 
+/** Near-silent loop keeps the R1 WebView audio session alive past the ~10s cutoff. */
+function startR1SilentAudioHold() {
+  if (runtimeEnv !== 'r1') return;
+  try {
+    if (r1SilentAudioHold?.ctx?.state === 'suspended') {
+      r1SilentAudioHold.ctx.resume().catch(() => {});
+      return;
+    }
+    if (r1SilentAudioHold) return;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const buffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+    const gain = ctx.createGain();
+    gain.gain.value = 0.0001;
+    source.connect(gain);
+    gain.connect(ctx.destination);
+    source.start(0);
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    r1SilentAudioHold = { ctx, source, gain };
+  } catch (e) {
+    console.warn('startR1SilentAudioHold:', e);
+  }
+}
+
+function stopR1SilentAudioHold() {
+  if (!r1SilentAudioHold) return;
+  try {
+    r1SilentAudioHold.source.stop();
+    r1SilentAudioHold.ctx.close();
+  } catch (e) { /* ignore */ }
+  r1SilentAudioHold = null;
+}
+
+async function requestR1WakeLock() {
+  if (runtimeEnv !== 'r1' || !('wakeLock' in navigator)) return;
+  try {
+    if (r1WakeLock) return;
+    r1WakeLock = await navigator.wakeLock.request('screen');
+    r1WakeLock.addEventListener('release', () => {
+      r1WakeLock = null;
+    });
+  } catch (e) {
+    console.warn('wakeLock:', e);
+  }
+}
+
+function releaseR1WakeLock() {
+  if (!r1WakeLock) return;
+  try {
+    r1WakeLock.release();
+  } catch (e) { /* ignore */ }
+  r1WakeLock = null;
+}
+
+function showR1AudioContinueHint() {
+  const el = document.getElementById('r1-audio-hint');
+  if (el) el.classList.remove('hidden');
+}
+
+function hideR1AudioContinueHint() {
+  const el = document.getElementById('r1-audio-hint');
+  if (el) el.classList.add('hidden');
+}
+
+function armR1AudioContinuePrompt() {
+  if (runtimeEnv !== 'r1') return;
+  if (r1AudioHintTimer) clearTimeout(r1AudioHintTimer);
+  hideR1AudioContinueHint();
+  r1AudioHintTimer = setTimeout(() => {
+    r1AudioHintTimer = null;
+    if (state.isPlaying && state.currentView === 'player') {
+      showR1AudioContinueHint();
+    }
+  }, 7500);
+}
+
+/** Re-seek current position to refresh DRM/stream (before the 10s WebView drop). */
+async function r1RefreshPlaybackStream() {
+  if (runtimeEnv !== 'r1' || !state.player || !state.isPlaying) return;
+  startR1SilentAudioHold();
+  try {
+    const cur = await state.player.getCurrentState();
+    if (!cur?.track_window?.current_track) return;
+    const pos = Math.max(0, cur.position);
+    await state.player.seek(pos);
+    await state.player.setVolume(1);
+    if (cur.paused) await state.player.resume();
+    await spotifyFetch(`/me/player/seek${playerDeviceQuery()}`, {
+      method: 'PUT',
+      body: JSON.stringify({ position_ms: Math.floor(pos) })
+    });
+  } catch (e) {
+    console.warn('r1RefreshPlaybackStream:', e);
+  }
+}
+
 /** R1: re-unlock audio several times right after starting playback (WebView drops ~10s). */
 function scheduleR1AudioBoost() {
   if (runtimeEnv !== 'r1') return;
+  armR1AudioContinuePrompt();
+  requestR1WakeLock();
+  startR1SilentAudioHold();
   startR1LocalAudio();
-  setTimeout(() => startR1LocalAudio(), 400);
-  setTimeout(() => startR1LocalAudio(), 1500);
-  setTimeout(() => startR1LocalAudio(), 3500);
-  setTimeout(() => startR1LocalAudio(), 8000);
+  [400, 1500, 3500, 7000, 9500, 12000, 16000].forEach((ms) => {
+    setTimeout(() => {
+      startR1LocalAudio();
+      if (ms >= 7000) r1RefreshPlaybackStream();
+    }, ms);
+  });
 }
 
 function fixSpotifyEmbedIframe() {
@@ -1336,6 +1448,9 @@ async function togglePlay() {
   }
 
   if (playing) {
+    hideR1AudioContinueHint();
+    stopR1SilentAudioHold();
+    releaseR1WakeLock();
     await apiPausePlayback();
     if (state.player) {
       try { await state.player.pause(); } catch (e) { /* ignore */ }
@@ -1803,19 +1918,25 @@ function updateProgress() {
 
 function startR1AudioKeepalive() {
   if (r1AudioKeepaliveInterval) clearInterval(r1AudioKeepaliveInterval);
+  if (r1StreamRefreshInterval) clearInterval(r1StreamRefreshInterval);
   if (runtimeEnv !== 'r1') return;
   r1AudioKeepaliveInterval = setInterval(() => {
     if (!state.isPlaying || !state.player) return;
-    gestureActivateAudioSync();
+    startR1SilentAudioHold();
     unlockWebAudio(true).catch(() => {});
     state.player.setVolume(1).catch(() => {});
-  }, 2500);
+  }, 2000);
+  r1StreamRefreshInterval = setInterval(() => {
+    if (!state.isPlaying) return;
+    r1RefreshPlaybackStream();
+  }, 8500);
 }
 
 function startProgressTimer() {
   if (state.progressInterval) clearInterval(state.progressInterval);
   if (r1ApiSyncInterval) clearInterval(r1ApiSyncInterval);
   if (r1AudioKeepaliveInterval) clearInterval(r1AudioKeepaliveInterval);
+  if (r1StreamRefreshInterval) clearInterval(r1StreamRefreshInterval);
   if (runtimeEnv === 'r1') {
     state.progressInterval = setInterval(() => {
       if (state.isPlaying && state.durationMs > 0) {
@@ -2066,6 +2187,13 @@ window.addEventListener('scrollDown', () => {
 window.addEventListener('sideClick', () => {
   gestureActivateAudioSync();
   if (state.currentView === 'player') {
+    const hint = document.getElementById('r1-audio-hint');
+    if (hint && !hint.classList.contains('hidden')) {
+      hideR1AudioContinueHint();
+      recoverR1Audio();
+      armR1AudioContinuePrompt();
+      return;
+    }
     togglePlay();
   }
 });
@@ -2272,6 +2400,15 @@ function wireControls() {
   const btnCheckLogin = document.getElementById('btn-check-login');
   if (btnCheckLogin) {
     bindTap(btnCheckLogin, () => checkCompanionLogin());
+  }
+
+  const r1AudioHint = document.getElementById('r1-audio-hint');
+  if (r1AudioHint) {
+    bindTap(r1AudioHint, () => {
+      hideR1AudioContinueHint();
+      recoverR1Audio();
+      armR1AudioContinuePrompt();
+    });
   }
 
   bindTap(document.getElementById('btn-play'), () => togglePlay());
