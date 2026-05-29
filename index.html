@@ -15,6 +15,14 @@
           !!window.creationStorage
         ));
         document.documentElement.classList.add(onR1 ? 'env-r1' : 'env-browser');
+        // Desktop-only preview shell: when opened top-level in a desktop
+        // browser (not the R1, not already inside the preview iframe, not an
+        // auth callback), render the app inside a true 240x282 frame scaled 2x
+        // so it looks exactly like the device. The R1 path is unaffected.
+        window.__SHELL__ = !onR1 &&
+          window.self === window.top &&
+          !q.has('code') &&
+          q.get('app') !== '1';
       })();
     </script>
     <link rel="stylesheet" href="/src/style.css">

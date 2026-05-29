@@ -217,7 +217,14 @@ async function startAuth() {
     code_challenge: codeChallenge
   });
 
-  window.location.href = `https://accounts.spotify.com/authorize?${params.toString()}`;
+  const authUrl = `https://accounts.spotify.com/authorize?${params.toString()}`;
+  // If running inside the desktop preview frame, break out to the top window
+  // so Spotify's login page (which blocks being framed) loads normally.
+  if (window.self !== window.top) {
+    window.top.location.href = authUrl;
+  } else {
+    window.location.href = authUrl;
+  }
 }
 
 async function handleAuthCallback(code) {
@@ -274,6 +281,12 @@ async function handleAuthCallback(code) {
     sessionStorage.removeItem('spotify_verifier');
   }
 
+  // On desktop, the auth callback lands top-level (outside the preview frame).
+  // Reload the clean root so the preview shell re-frames the now-authed app.
+  if (runtimeEnv === 'browser' && window.self === window.top) {
+    window.location.replace(SPOTIFY_REDIRECT_URI);
+    return true;
+  }
   window.history.replaceState({}, document.title, SPOTIFY_REDIRECT_URI);
   return true;
 }
@@ -1131,7 +1144,37 @@ function bootDone() {
   if (bootFallback) bootFallback.remove();
 }
 
+function renderDesktopShell() {
+  document.documentElement.style.height = '100%';
+  document.body.style.cssText =
+    'margin:0;height:100vh;background:#15171a;display:flex;flex-direction:column;' +
+    'align-items:center;justify-content:center;gap:28px;' +
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#888;';
+  document.body.innerHTML = '';
+
+  const frame = document.createElement('div');
+  frame.style.cssText =
+    'width:240px;height:282px;transform:scale(2);transform-origin:center center;' +
+    'border-radius:10px;overflow:hidden;background:#000;' +
+    'box-shadow:0 0 0 2px #2a2a2a,0 20px 60px rgba(0,0,0,0.6);';
+
+  const iframe = document.createElement('iframe');
+  iframe.src = window.location.pathname + '?app=1';
+  iframe.style.cssText = 'width:240px;height:282px;border:0;display:block;';
+  frame.appendChild(iframe);
+  document.body.appendChild(frame);
+
+  const label = document.createElement('div');
+  label.style.cssText = 'font-size:13px;text-align:center;max-width:520px;line-height:1.4;';
+  label.textContent = 'R1 device preview — 240×282 shown at 2× (desktop only). The R1 displays this exact frame full-screen.';
+  document.body.appendChild(label);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  if (window.__SHELL__) {
+    renderDesktopShell();
+    return;
+  }
   try {
     bootStatus('Module running — wiring controls…');
     wireControls();
