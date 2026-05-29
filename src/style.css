@@ -477,33 +477,36 @@ html, body {
     padding-right: 1vw;
 }
 
-/* Pack ☰ transport ♫ (i) as one tight row — avoid space-between gaps */
+/* Match art-expanded (70%) control row placement in default view */
 .env-r1 .controls {
-    display: flex;
-    flex-direction: row;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
     align-items: center;
-    justify-content: center;
     width: 100%;
     max-width: 100%;
     box-sizing: border-box;
-    gap: 2px;
+    gap: 2.5vw;
 }
 
-.env-r1 .controls-spacer,
-.env-r1 .controls-main,
-.env-r1 .controls-side {
+.env-r1 .controls-spacer {
     display: flex;
     align-items: center;
-    flex: 0 0 auto;
+    justify-content: flex-start;
 }
 
 .env-r1 .controls-main {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     gap: 0;
     margin: 0;
 }
 
 .env-r1 .controls-side {
-    gap: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5vw;
     padding: 0;
     margin: 0;
     min-width: 0;
