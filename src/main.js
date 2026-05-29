@@ -127,6 +127,12 @@ function showAuthRedirectHint() {
   if (el) el.textContent = SPOTIFY_REDIRECT_URI;
 }
 
+function showAuthStatus(msg) {
+  const el = document.getElementById('auth-status');
+  if (el) el.textContent = msg || '';
+  if (msg) bootStatus(msg);
+}
+
 // ===========================================
 // Storage Helpers
 // ===========================================
@@ -192,20 +198,82 @@ async function generateCodeChallenge(verifier) {
   const encoder = new TextEncoder();
   const data = encoder.encode(verifier);
   const digest = await crypto.subtle.digest('SHA-256', data);
-  return btoa(String.fromCharCode(...new Uint8Array(digest)))
+  const bytes = new Uint8Array(digest);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary)
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-async function startAuth() {
-  const codeVerifier = generateRandomString(64);
-  const codeChallenge = await generateCodeChallenge(codeVerifier);
-
+/** Store PKCE verifier in every store the R1 WebView might keep across login. */
+async function storeCodeVerifier(codeVerifier) {
+  try {
+    sessionStorage.setItem('spotify_verifier', codeVerifier);
+  } catch (e) { /* ignore */ }
+  try {
+    localStorage.setItem('spotify_verifier', codeVerifier);
+  } catch (e) { /* ignore */ }
   if (window.creationStorage) {
     try {
       await window.creationStorage.plain.setItem('spotify_verifier', btoa(codeVerifier));
+    } catch (e) {
+      console.warn('creationStorage verifier save failed:', e);
+    }
+  }
+}
+
+async function loadCodeVerifier() {
+  if (window.creationStorage) {
+    try {
+      const stored = await window.creationStorage.plain.getItem('spotify_verifier');
+      if (stored) return atob(stored);
     } catch (e) { /* fallback */ }
-  } else {
-    sessionStorage.setItem('spotify_verifier', codeVerifier);
+  }
+  try {
+    const fromSession = sessionStorage.getItem('spotify_verifier');
+    if (fromSession) return fromSession;
+  } catch (e) { /* ignore */ }
+  try {
+    return localStorage.getItem('spotify_verifier');
+  } catch (e) {
+    return null;
+  }
+}
+
+async function clearCodeVerifier() {
+  try {
+    sessionStorage.removeItem('spotify_verifier');
+  } catch (e) { /* ignore */ }
+  try {
+    localStorage.removeItem('spotify_verifier');
+  } catch (e) { /* ignore */ }
+  if (window.creationStorage) {
+    try {
+      await window.creationStorage.plain.removeItem('spotify_verifier');
+    } catch (e) { /* ignore */ }
+  }
+}
+
+async function startAuth() {
+  showAuthStatus('Opening Spotify login…');
+  const btn = document.getElementById('btn-connect');
+  if (btn) btn.disabled = true;
+
+  let codeVerifier;
+  let codeChallenge;
+  try {
+    codeVerifier = generateRandomString(64);
+    codeChallenge = await generateCodeChallenge(codeVerifier);
+    await storeCodeVerifier(codeVerifier);
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    const msg = 'Could not start login: ' + (e && e.message ? e.message : String(e));
+    showAuthStatus(msg);
+    showToast(msg, 5000);
+    bootError(msg);
+    return;
   }
 
   const params = new URLSearchParams({
@@ -228,23 +296,20 @@ async function startAuth() {
 }
 
 async function handleAuthCallback(code) {
-  let codeVerifier;
-  if (window.creationStorage) {
-    try {
-      const stored = await window.creationStorage.plain.getItem('spotify_verifier');
-      if (stored) codeVerifier = atob(stored);
-    } catch (e) { /* fallback */ }
-  }
-  if (!codeVerifier) {
-    codeVerifier = sessionStorage.getItem('spotify_verifier');
-  }
+  showAuthStatus('Finishing login…');
+  const codeVerifier = await loadCodeVerifier();
 
   if (!codeVerifier) {
-    showToast('Auth error: missing verifier');
+    const msg = 'Login session lost. Tap Connect and try again.';
+    showAuthStatus(msg);
+    showToast(msg, 5000);
+    bootError(msg);
     return false;
   }
 
-  const response = await fetch('https://accounts.spotify.com/api/token', {
+  let response;
+  try {
+    response = await fetch('https://accounts.spotify.com/api/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -254,7 +319,14 @@ async function handleAuthCallback(code) {
       redirect_uri: SPOTIFY_REDIRECT_URI,
       code_verifier: codeVerifier
     })
-  });
+    });
+  } catch (e) {
+    const msg = 'Network error during login';
+    showAuthStatus(msg);
+    showToast(msg, 5000);
+    bootError(msg);
+    return false;
+  }
 
   if (!response.ok) {
     let detail = 'Auth failed';
@@ -263,7 +335,9 @@ async function handleAuthCallback(code) {
       if (err.error_description) detail = err.error_description;
       else if (err.error) detail = err.error;
     } catch (e) { /* ignore */ }
-    showToast(detail, 4000);
+    showAuthStatus(detail);
+    showToast(detail, 5000);
+    bootError(detail);
     return false;
   }
 
@@ -272,14 +346,8 @@ async function handleAuthCallback(code) {
   state.refreshToken = data.refresh_token;
   state.tokenExpiry = Date.now() + (data.expires_in * 1000);
   await saveTokens();
-
-  if (window.creationStorage) {
-    try {
-      await window.creationStorage.plain.removeItem('spotify_verifier');
-    } catch (e) { /* ignore */ }
-  } else {
-    sessionStorage.removeItem('spotify_verifier');
-  }
+  await clearCodeVerifier();
+  showAuthStatus('');
 
   // On desktop, the auth callback lands top-level (outside the preview frame).
   // Reload the clean root so the preview shell re-frames the now-authed app.
@@ -1095,19 +1163,36 @@ window.addEventListener('longPressEnd', () => {
 // ===========================================
 
 async function init() {
-  // Check for auth callback
   const urlParams = new URLSearchParams(window.location.search);
+  const oauthError = urlParams.get('error');
+
+  if (oauthError) {
+    const msg = 'Spotify login cancelled: ' + oauthError;
+    showAuthStatus(msg);
+    showView('auth');
+    showAuthRedirectHint();
+    window.history.replaceState({}, document.title, SPOTIFY_REDIRECT_URI);
+    bootError(msg);
+    return 'error';
+  }
+
   const code = urlParams.get('code');
 
   if (code) {
+    bootStatus('Spotify returned — finishing login…');
     const success = await handleAuthCallback(code);
     if (success) {
       initPlayer();
       showView('player');
       fetchPlaylists();
       startProgressTimer();
-      return;
+      return 'player';
     }
+    showView('auth');
+    showAuthRedirectHint();
+    const btn = document.getElementById('btn-connect');
+    if (btn) btn.disabled = false;
+    return 'error';
   }
 
   const tokens = await loadTokens();
@@ -1123,7 +1208,7 @@ async function init() {
       showView('player');
       fetchPlaylists();
       startProgressTimer();
-      return;
+      return 'player';
     }
     await clearTokens();
   }
@@ -1131,6 +1216,7 @@ async function init() {
   showView('auth');
   showAuthRedirectHint();
   console.info(`[Spotify R1] env=${runtimeEnv} — Redirect URI:`, SPOTIFY_REDIRECT_URI);
+  return 'auth';
 }
 
 function bootStatus(msg) {
@@ -1180,7 +1266,10 @@ document.addEventListener('DOMContentLoaded', () => {
     wireControls();
     bootStatus('Controls ready — starting app…');
     init()
-      .then(() => bootDone())
+      .then((result) => {
+        if (result === 'error') return;
+        bootDone();
+      })
       .catch((e) => bootError('init() failed: ' + (e && e.message ? e.message : String(e))));
   } catch (e) {
     bootError('startup failed: ' + (e && e.message ? e.message : String(e)));

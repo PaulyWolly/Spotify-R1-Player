@@ -87,6 +87,17 @@ html, body {
     line-height: 1.25;
 }
 
+.auth-status {
+    margin-top: 2vw;
+    font-size: 3.2vw;
+    line-height: 1.35;
+    color: #ffaa44;
+    text-align: center;
+    word-break: break-word;
+    max-height: 18vh;
+    overflow-y: auto;
+}
+
 .auth-redirect-uri {
     font-size: 2.8vw;
     color: #1db954;
@@ -663,7 +674,9 @@ html, body {
     font-size: 3.5vw;
     padding: 2vw 5vw;
     border-radius: 5vw;
-    white-space: nowrap;
+    white-space: normal;
+    max-width: 90vw;
+    text-align: center;
     z-index: 200;
     transition: opacity 0.3s;
 }
