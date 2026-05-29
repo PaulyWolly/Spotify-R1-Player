@@ -1673,7 +1673,6 @@ function setPlaybackStatus(mode) {
     el.setAttribute('role', 'button');
     el.setAttribute('tabindex', '0');
     el.setAttribute('aria-label', 'Show songs in the current list');
-    el.setAttribute('title', 'Show songs in the current list');
   } else {
     el.removeAttribute('role');
     el.removeAttribute('tabindex');
