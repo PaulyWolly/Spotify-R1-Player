@@ -798,15 +798,40 @@ async function ensurePlayerFromGesture() {
 }
 
 /** Mobile / WebView: unlock audio output (must run during a user gesture). */
-async function unlockWebAudio() {
-  if (!state.player || state.audioUnlocked) return;
+async function unlockWebAudio(force = false) {
+  if (!state.player) return;
+  if (!force && state.audioUnlocked) return;
   try {
     if (typeof state.player.activateElement === 'function') {
       await state.player.activateElement();
     }
+    await state.player.setVolume(1);
     state.audioUnlocked = true;
   } catch (e) {
     console.warn('activateElement:', e);
+  }
+}
+
+/** R1: always re-unlock audio on tap — WebView often drops output until activateElement runs. */
+async function forceUnlockR1Audio() {
+  if (runtimeEnv !== 'r1' || !state.player) return;
+  await unlockWebAudio(true);
+}
+
+async function startR1LocalAudio() {
+  if (runtimeEnv !== 'r1' || !state.player) return;
+  await forceUnlockR1Audio();
+  try {
+    const cur = await state.player.getCurrentState();
+    if (cur?.paused) await state.player.resume();
+  } catch (e) {
+    console.warn('startR1LocalAudio resume:', e);
+  }
+  const ok = await apiResumePlayback();
+  if (!ok) {
+    try {
+      await state.player.resume();
+    } catch (e) { /* ignore */ }
   }
 }
 
@@ -820,7 +845,7 @@ async function ensurePlaybackDevice() {
 /** R1 only: unlock audio + transfer once. Avoid re-transfer on every tap (causes playback_error). */
 async function preparePlaybackForUserAction() {
   if (runtimeEnv !== 'r1') return;
-  await unlockWebAudio();
+  await forceUnlockR1Audio();
   await ensurePlaybackDevice();
 }
 
@@ -838,7 +863,7 @@ function installR1AudioUnlock() {
   if (runtimeEnv !== 'r1' || state._r1UnlockInstalled) return;
   state._r1UnlockInstalled = true;
   const onGesture = () => {
-    unlockWebAudio();
+    forceUnlockR1Audio();
   };
   document.addEventListener('click', onGesture, true);
   document.addEventListener('touchstart', onGesture, { capture: true, passive: true });
@@ -874,7 +899,7 @@ async function setupPlayer() {
   }
 
   const player = new Spotify.Player({
-    name: 'R1 Device',
+    name: runtimeEnv === 'r1' ? 'Rabbit R1' : 'R1 Device',
     getOAuthToken: async (cb) => {
       let t = await getValidToken();
       if (!t && state.refreshToken) {
@@ -981,6 +1006,23 @@ async function transferPlayback(deviceId) {
 async function syncNowPlayingFromApi() {
   const data = await spotifyFetch('/me/player');
   if (!data || data._error || !data.item) return;
+
+  if (
+    runtimeEnv === 'r1' &&
+    state.deviceId &&
+    data.device?.id &&
+    data.device.id !== state.deviceId
+  ) {
+    if (!state._wrongDeviceWarned) {
+      state._wrongDeviceWarned = true;
+      const where = data.device.name || 'another device';
+      showToast(`Audio on ${where} — switching to R1…`, 4000);
+    }
+    state.activeDeviceId = null;
+    await ensurePlaybackDevice();
+    await startR1LocalAudio();
+  }
+
   state.isPlaying = !!data.is_playing;
   state.progressMs = data.progress_ms || 0;
   state.durationMs = data.item.duration_ms || 0;
@@ -1122,6 +1164,7 @@ async function togglePlay() {
   }
 
   if (cur.paused) {
+    await forceUnlockR1Audio();
     const ok = await apiResumePlayback();
     if (!ok) {
       try {
@@ -1131,6 +1174,8 @@ async function togglePlay() {
       } catch (e) {
         showToast('Could not start playback', 4000);
       }
+    } else {
+      await startR1LocalAudio();
     }
     return;
   }
@@ -1245,6 +1290,7 @@ async function playContext(contextUri, offset = 0) {
     return false;
   }
   syncNowPlayingFromApi();
+  if (runtimeEnv === 'r1') await startR1LocalAudio();
   return true;
 }
 
@@ -1281,6 +1327,7 @@ async function playTrackUris(uris, offset = 0) {
     updatePlayerUI();
   }
   syncNowPlayingFromApi();
+  if (runtimeEnv === 'r1') await startR1LocalAudio();
   return true;
 }
 
@@ -1552,6 +1599,10 @@ function updateProgress() {
 
 function startProgressTimer() {
   if (state.progressInterval) clearInterval(state.progressInterval);
+  if (runtimeEnv === 'r1') {
+    state.progressInterval = setInterval(() => syncNowPlayingFromApi(), 2000);
+    return;
+  }
   state.progressInterval = setInterval(() => {
     if (state.isPlaying && state.durationMs > 0) {
       state.progressMs += 500;
