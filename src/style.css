@@ -502,6 +502,11 @@ html, body {
     margin: 0;
 }
 
+.env-r1 .controls-main .ctrl-btn,
+.env-r1 .controls-main #btn-play.ctrl-play {
+    margin: 10px;
+}
+
 .env-r1 .controls-side {
     display: flex;
     align-items: center;
@@ -519,7 +524,6 @@ html, body {
     min-width: 28px;
     min-height: 28px;
     font-size: 13px;
-    margin: 0;
     padding-left: 1px;
     padding-bottom: 0;
 }
@@ -535,7 +539,6 @@ html, body {
     min-height: 20px;
     font-size: 11px;
     padding: 0;
-    margin: 0;
 }
 
 .env-r1 .ctrl-library {
