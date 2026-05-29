@@ -55,6 +55,8 @@ const state = {
 };
 
 let companionPollTimer = null;
+let cachedPairSession = null;
+let companionLoginStarted = false;
 
 // ===========================================
 // Runtime environment (R1 vs browser)
@@ -223,31 +225,64 @@ function generateSessionCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
-async function getOrCreateAuthSession() {
+async function persistPairSession(code) {
   const storageKey = 'spotify_pair_session';
-  // R1: creationStorage survives card reloads; sessionStorage often does not.
-  if (window.creationStorage) {
-    try {
-      const stored = await window.creationStorage.plain.getItem(storageKey);
-      if (stored && /^\d{6}$/.test(stored)) {
-        try { sessionStorage.setItem(storageKey, stored); } catch (e) { /* ignore */ }
-        return stored;
-      }
-    } catch (e) { /* ignore */ }
-  }
-  try {
-    const existing = sessionStorage.getItem(storageKey);
-    if (existing && /^\d{6}$/.test(existing)) return existing;
-  } catch (e) { /* ignore */ }
-  const code = generateSessionCode();
+  cachedPairSession = code;
   try {
     sessionStorage.setItem(storageKey, code);
+  } catch (e) { /* ignore */ }
+  try {
+    localStorage.setItem(storageKey, code);
   } catch (e) { /* ignore */ }
   if (window.creationStorage) {
     try {
       await window.creationStorage.plain.setItem(storageKey, code);
     } catch (e) { /* ignore */ }
   }
+}
+
+async function getOrCreateAuthSession() {
+  if (cachedPairSession && /^\d{6}$/.test(cachedPairSession)) {
+    return cachedPairSession;
+  }
+
+  const storageKey = 'spotify_pair_session';
+  const readers = [];
+
+  if (window.creationStorage) {
+    readers.push(async () => {
+      try {
+        return await window.creationStorage.plain.getItem(storageKey);
+      } catch (e) {
+        return null;
+      }
+    });
+  }
+  readers.push(async () => {
+    try {
+      return localStorage.getItem(storageKey);
+    } catch (e) {
+      return null;
+    }
+  });
+  readers.push(async () => {
+    try {
+      return sessionStorage.getItem(storageKey);
+    } catch (e) {
+      return null;
+    }
+  });
+
+  for (let i = 0; i < readers.length; i++) {
+    const stored = await readers[i]();
+    if (stored && /^\d{6}$/.test(stored)) {
+      await persistPairSession(stored);
+      return stored;
+    }
+  }
+
+  const code = generateSessionCode();
+  await persistPairSession(code);
   return code;
 }
 
@@ -364,6 +399,9 @@ async function publishTokensToSession(sessionId) {
 }
 
 async function startR1CompanionLogin() {
+  if (companionLoginStarted) return;
+  companionLoginStarted = true;
+
   const sessionId = await getOrCreateAuthSession();
   const pairEl = document.getElementById('pair-code');
   const helperUrl = document.getElementById('helper-login-url');
