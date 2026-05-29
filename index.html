@@ -20,6 +20,7 @@
         // auth callback), render the app inside a true 240x282 frame scaled 2x
         // so it looks exactly like the device. The R1 path is unaffected.
         window.__SHELL__ = !onR1 &&
+          window.innerWidth >= 420 &&
           window.self === window.top &&
           !q.has('code') &&
           q.get('app') !== '1';
