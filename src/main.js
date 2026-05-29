@@ -249,6 +249,30 @@ async function persistPairSession(code) {
   }
 }
 
+async function clearPairSession() {
+  cachedPairSession = null;
+  const storageKey = 'spotify_pair_session';
+  try {
+    sessionStorage.removeItem(storageKey);
+  } catch (e) { /* ignore */ }
+  try {
+    localStorage.removeItem(storageKey);
+  } catch (e) { /* ignore */ }
+  if (window.creationStorage) {
+    try {
+      await window.creationStorage.plain.removeItem(storageKey);
+    } catch (e) { /* ignore */ }
+  }
+}
+
+/** New 6-digit code every time the R1 login screen is shown. */
+async function createFreshAuthSession() {
+  await clearPairSession();
+  const code = generateSessionCode();
+  await persistPairSession(code);
+  return code;
+}
+
 async function getOrCreateAuthSession() {
   if (cachedPairSession && /^\d{6}$/.test(cachedPairSession)) {
     return cachedPairSession;
@@ -363,14 +387,27 @@ async function pollAuthSession(sessionId) {
 }
 
 async function checkCompanionLogin() {
-  const sessionId = await getOrCreateAuthSession();
   const pairEl = document.getElementById('pair-code');
-  if (pairEl) pairEl.textContent = sessionId;
+  const sessionId = (pairEl?.textContent || '').replace(/\D/g, '');
+  const code = /^\d{6}$/.test(sessionId) ? sessionId : await getOrCreateAuthSession();
+  if (pairEl) pairEl.textContent = code;
+  cachedPairSession = code;
   showAuthStatus('Checking phone login…');
-  const ok = await pollAuthSession(sessionId);
+  const ok = await pollAuthSession(code);
   if (!ok) {
-    showAuthStatus('Waiting — use code ' + sessionId + ' on phone (see URL above)');
+    showAuthStatus('Waiting — use code ' + code + ' on phone (see URL above)');
   }
+}
+
+async function refreshPairingCode() {
+  stopCompanionPolling();
+  const sessionId = await createFreshAuthSession();
+  const pairEl = document.getElementById('pair-code');
+  const helperUrl = document.getElementById('helper-login-url');
+  if (pairEl) pairEl.textContent = sessionId;
+  if (helperUrl) helperUrl.textContent = getHelperLoginUrl(sessionId);
+  showAuthStatus('New code — log in on phone with ' + sessionId);
+  startCompanionAuthPolling(sessionId);
 }
 
 function startCompanionAuthPolling(sessionId) {
@@ -407,10 +444,8 @@ async function publishTokensToSession(sessionId) {
 }
 
 async function startR1CompanionLogin() {
-  if (companionLoginStarted) return;
   companionLoginStarted = true;
-
-  const sessionId = await getOrCreateAuthSession();
+  const sessionId = await createFreshAuthSession();
   const pairEl = document.getElementById('pair-code');
   const helperUrl = document.getElementById('helper-login-url');
   if (pairEl) pairEl.textContent = sessionId;
@@ -1419,6 +1454,49 @@ async function togglePlay() {
     return;
   }
 
+  await preparePlaybackForUserAction();
+
+  let cur = null;
+  try {
+    cur = await state.player.getCurrentState();
+  } catch (e) {
+    console.warn('getCurrentState:', e);
+  }
+
+  if (cur?.track_window?.current_track) {
+    if (cur.paused) {
+      state.userPaused = false;
+      await apiResumePlayback();
+      try {
+        await state.player.resume();
+      } catch (e) {
+        console.warn('resume:', e);
+      }
+      state.isPlaying = true;
+      updatePlayButton();
+      scheduleR1AudioBoost();
+    } else {
+      state.userPaused = true;
+      state.isPlaying = false;
+      hideR1AudioContinueHint();
+      stopR1AutoRenew();
+      cancelR1BoostTimers();
+      if (r1AudioHintTimer) {
+        clearTimeout(r1AudioHintTimer);
+        r1AudioHintTimer = null;
+      }
+      await apiPausePlayback();
+      try {
+        await state.player.pause();
+      } catch (e) {
+        console.warn('pause:', e);
+      }
+      updatePlayButton();
+    }
+    setTimeout(() => syncNowPlayingFromApi(), 400);
+    return;
+  }
+
   if (!state.currentTrack?.uri && !state.currentPlaylistTracks.length) {
     const snap = await fetchPlayerSnapshot();
     if (!snap?.item) {
@@ -1428,78 +1506,35 @@ async function togglePlay() {
     }
   }
 
-  // UI state drives toggle — SDK often reports "playing" while R1 is silent/paused.
-  const shouldPause = state.isPlaying && !state.userPaused;
-
-  if (shouldPause) {
-    state.userPaused = true;
-    state.isPlaying = false;
-    hideR1AudioContinueHint();
-    stopR1AutoRenew();
-    cancelR1BoostTimers();
-    if (r1AudioHintTimer) {
-      clearTimeout(r1AudioHintTimer);
-      r1AudioHintTimer = null;
-    }
-    await apiPausePlayback();
-    if (state.player) {
-      try { await state.player.pause(); } catch (e) { /* ignore */ }
-    }
-    updatePlayButton();
-    return;
-  }
-
   state.userPaused = false;
-  await preparePlaybackForUserAction();
-
   let started = false;
-  let cur = null;
-  try {
-    cur = await state.player.getCurrentState();
-  } catch (e) {
-    console.warn('getCurrentState:', e);
-  }
-  if (cur?.track_window?.current_track && cur.paused) {
-    try {
-      await state.player.resume();
-      started = true;
-      state.isPlaying = true;
-      updatePlayButton();
-    } catch (e) {
-      console.warn('resume:', e);
-    }
-  }
-  if (!started) {
-    if (state.currentPlaylistUri) {
-      const offset = state.currentPlaylistTracks.findIndex(
-        (t) => t.uri === state.currentTrack?.uri
-      );
-      started = await playContext(
-        state.currentPlaylistUri,
-        offset >= 0 ? offset : 0
-      );
-    } else if (state.currentPlaylistTracks.length > 0) {
-      const idx = state.currentPlaylistTracks.findIndex(
-        (t) => t.uri === state.currentTrack?.uri
-      );
-      started = await playTrackUris(
-        state.currentPlaylistTracks.map((t) => t.uri),
-        idx >= 0 ? idx : 0
-      );
-    } else if (state.currentTrack?.uri) {
-      started = await playTrackUris([state.currentTrack.uri], 0);
-    } else {
-      started = await startDefaultPlayback();
-    }
+  if (state.currentPlaylistUri) {
+    const offset = state.currentPlaylistTracks.findIndex(
+      (t) => t.uri === state.currentTrack?.uri
+    );
+    started = await playContext(
+      state.currentPlaylistUri,
+      offset >= 0 ? offset : 0
+    );
+  } else if (state.currentPlaylistTracks.length > 0) {
+    const idx = state.currentPlaylistTracks.findIndex(
+      (t) => t.uri === state.currentTrack?.uri
+    );
+    started = await playTrackUris(
+      state.currentPlaylistTracks.map((t) => t.uri),
+      idx >= 0 ? idx : 0
+    );
+  } else if (state.currentTrack?.uri) {
+    started = await playTrackUris([state.currentTrack.uri], 0);
+  } else {
+    started = await startDefaultPlayback();
   }
   if (!started) {
     showToast('Could not start — try Play All or pick a song', 4500);
     return;
   }
   state.isPlaying = true;
-  state.userPaused = false;
   updatePlayButton();
-  scheduleR1AudioBoost();
   setTimeout(() => syncNowPlayingFromApi(), 400);
 }
 
@@ -2308,10 +2343,12 @@ async function init() {
       return 'player';
     }
     await clearTokens();
+    companionLoginStarted = false;
     showAuthStatus('Session expired — log in on phone again');
   }
 
   showView('auth');
+  companionLoginStarted = false;
   configureAuthUIForEnv();
   console.info(`[Spotify R1] env=${runtimeEnv} — Redirect URI:`, SPOTIFY_REDIRECT_URI);
   return 'auth';
@@ -2397,6 +2434,10 @@ function wireControls() {
   const btnCheckLogin = document.getElementById('btn-check-login');
   if (btnCheckLogin) {
     bindTap(btnCheckLogin, () => checkCompanionLogin());
+  }
+  const btnNewCode = document.getElementById('btn-new-code');
+  if (btnNewCode) {
+    bindTap(btnNewCode, () => refreshPairingCode());
   }
 
   const r1AudioHint = document.getElementById('r1-audio-hint');
