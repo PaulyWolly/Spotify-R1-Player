@@ -1340,6 +1340,9 @@ async function startDefaultPlayback() {
 
 function handlePlayerStateChange(playerState) {
   const track = playerState.track_window?.current_track;
+  if (!playerState.paused) {
+    state.userPaused = false;
+  }
   if (!state.userPaused) {
     state.isPlaying = !playerState.paused;
   }
@@ -1411,29 +1414,12 @@ async function togglePlay() {
   }
 
   gestureActivateAudioSync();
-  if (!(await ensurePlayerFromGesture())) return;
-
-  let playing = null;
-  try {
-    const cur = await state.player.getCurrentState();
-    if (cur?.track_window?.current_track) {
-      playing = !cur.paused;
-    }
-  } catch (e) {
-    console.warn('getCurrentState:', e);
+  if (!(await ensurePlayerFromGesture())) {
+    showToast('Player connecting… tap ▶ again', 4000);
+    return;
   }
-  if (playing === null) {
-    const snap = await fetchPlayerSnapshot();
-    if (!snap?.item && !state.currentTrack?.uri && !state.currentPlaylistTracks.length) {
-      const started = await startDefaultPlayback();
-      if (!started) showToast('Open ☰ and pick a playlist', 4000);
-      return;
-    }
-    playing = snap ? !!snap.is_playing : state.isPlaying;
-  } else if (
-    !state.currentTrack?.uri &&
-    !state.currentPlaylistTracks.length
-  ) {
+
+  if (!state.currentTrack?.uri && !state.currentPlaylistTracks.length) {
     const snap = await fetchPlayerSnapshot();
     if (!snap?.item) {
       const started = await startDefaultPlayback();
@@ -1442,7 +1428,10 @@ async function togglePlay() {
     }
   }
 
-  if (playing) {
+  // UI state drives toggle — SDK often reports "playing" while R1 is silent/paused.
+  const shouldPause = state.isPlaying && !state.userPaused;
+
+  if (shouldPause) {
     state.userPaused = true;
     state.isPlaying = false;
     hideR1AudioContinueHint();
@@ -1474,6 +1463,8 @@ async function togglePlay() {
     try {
       await state.player.resume();
       started = true;
+      state.isPlaying = true;
+      updatePlayButton();
     } catch (e) {
       console.warn('resume:', e);
     }
@@ -1502,9 +1493,12 @@ async function togglePlay() {
     }
   }
   if (!started) {
-    showToast('Nothing to play — open ☰', 4000);
+    showToast('Could not start — try Play All or pick a song', 4500);
     return;
   }
+  state.isPlaying = true;
+  state.userPaused = false;
+  updatePlayButton();
   scheduleR1AudioBoost();
   setTimeout(() => syncNowPlayingFromApi(), 400);
 }
@@ -1610,6 +1604,8 @@ async function playContext(contextUri, offset = 0) {
     showToast(result._error, 3500);
     return false;
   }
+  state.isPlaying = true;
+  state.userPaused = false;
   syncNowPlayingFromApi();
   if (runtimeEnv === 'r1') scheduleR1AudioBoost();
   return true;
@@ -1648,6 +1644,8 @@ async function playTrackUris(uris, offset = 0) {
     };
     updatePlayerUI();
   }
+  state.isPlaying = true;
+  state.userPaused = false;
   syncNowPlayingFromApi();
   if (runtimeEnv === 'r1') scheduleR1AudioBoost();
   return true;
