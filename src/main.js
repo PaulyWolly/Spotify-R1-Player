@@ -1657,11 +1657,14 @@ function setPlaybackStatus(mode) {
   const el = document.getElementById('playback-status');
   if (!el) return;
   if (mode === 'all') {
-    el.textContent = '♫ All';
+    el.textContent = runtimeEnv === 'r1' ? '♫' : '♫ All';
+    el.setAttribute('title', 'Playing whole playlist — tap for song list');
   } else if (mode === 'song') {
-    el.textContent = '♫ Song';
+    el.textContent = runtimeEnv === 'r1' ? '♫' : '♫ Song';
+    el.setAttribute('title', 'Playing one song — tap for song list');
   } else {
     el.textContent = '';
+    el.removeAttribute('title');
   }
 
   const interactive = mode === 'all' || mode === 'song';
