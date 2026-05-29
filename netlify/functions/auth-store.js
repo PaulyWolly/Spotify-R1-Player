@@ -1,4 +1,4 @@
-const { getStore } = require('@netlify/blobs');
+const { connectLambda, getDeployStore } = require('@netlify/blobs');
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -16,6 +16,7 @@ exports.handler = async (event) => {
   }
 
   try {
+    connectLambda(event);
     const body = JSON.parse(event.body || '{}');
     const session = String(body.session || '').replace(/\D/g, '');
     if (session.length !== 6) {
@@ -25,7 +26,7 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'Missing tokens' }) };
     }
 
-    const store = getStore('spotify-auth');
+    const store = getDeployStore('spotify-auth');
     await store.set(session, JSON.stringify(body.tokens), {
       metadata: { expiresAt: String(Date.now() + 10 * 60 * 1000) }
     });

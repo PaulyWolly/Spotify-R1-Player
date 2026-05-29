@@ -1,4 +1,4 @@
-const { getStore } = require('@netlify/blobs');
+const { connectLambda, getDeployStore } = require('@netlify/blobs');
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -14,7 +14,8 @@ exports.handler = async (event) => {
   }
 
   try {
-    const store = getStore('spotify-auth');
+    connectLambda(event);
+    const store = getDeployStore('spotify-auth');
     const raw = await store.get(session);
     if (!raw) {
       return { statusCode: 200, headers: cors, body: JSON.stringify({ pending: true }) };
