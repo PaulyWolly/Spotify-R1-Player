@@ -1225,36 +1225,33 @@ async function togglePlay() {
   if (!(await ensurePlayerFromGesture())) return;
   await preparePlaybackForUserAction();
 
-  let cur = null;
-  try {
-    cur = await state.player.getCurrentState();
-  } catch (e) {
-    console.warn('getCurrentState:', e);
-  }
-
-  if (!cur?.track_window?.current_track) {
+  if (!state.currentTrack?.uri && !state.currentPlaylistTracks.length) {
     const started = await startDefaultPlayback();
     if (!started) showToast('Open ☰ and pick a playlist', 4000);
     return;
   }
 
-  if (cur.paused) {
-    await startR1LocalAudio();
-    state.isPlaying = true;
-    updatePlayButton();
-    return;
-  }
-
-  const paused = await apiPausePlayback();
-  if (!paused) {
-    try {
-      await state.player.pause();
-      state.isPlaying = false;
-      updatePlayButton();
-    } catch (e) {
-      showToast('Could not pause', 3000);
+  // R1 WebView: SDK state is often missing — use API + UI state for play/pause.
+  if (state.isPlaying) {
+    const paused = await apiPausePlayback();
+    if (!paused && state.player) {
+      try { await state.player.pause(); } catch (e) { /* ignore */ }
     }
+  } else {
+    const ok = await apiResumePlayback();
+    if (!ok) {
+      if (state.currentPlaylistTracks.length > 0) {
+        await playTrackUris(state.currentPlaylistTracks.map((t) => t.uri), 0);
+      } else if (state.currentTrack?.uri) {
+        await playTrackUris([state.currentTrack.uri], 0);
+      } else {
+        showToast('Pick a song first (☰)', 4000);
+        return;
+      }
+    }
+    await startR1LocalAudio();
   }
+  await syncNowPlayingFromApi();
 }
 
 async function nextTrack() {
@@ -1665,16 +1662,7 @@ function updateProgress() {
 function startProgressTimer() {
   if (state.progressInterval) clearInterval(state.progressInterval);
   if (runtimeEnv === 'r1') {
-    state.progressInterval = setInterval(() => {
-      if (!state.player) {
-        syncNowPlayingFromApi();
-        return;
-      }
-      state.player.getCurrentState().then((cur) => {
-        if (cur) handlePlayerStateChange(cur);
-        else syncNowPlayingFromApi();
-      }).catch(() => syncNowPlayingFromApi());
-    }, 1500);
+    state.progressInterval = setInterval(() => syncNowPlayingFromApi(), 1500);
     return;
   }
   state.progressInterval = setInterval(() => {
