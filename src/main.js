@@ -147,15 +147,41 @@ function isHelperMode() {
   return false;
 }
 
-function markHelperLoginStarted() {
+const PHONE_SESSION_KEY = 'spotify_phone_session';
+
+function rememberPhoneSession(sessionId) {
+  const id = String(sessionId || '').replace(/\D/g, '');
+  if (id.length !== 6) return null;
+  try {
+    sessionStorage.setItem(PHONE_SESSION_KEY, id);
+  } catch (e) { /* ignore */ }
+  return id;
+}
+
+function getPhoneSession() {
+  const q = new URLSearchParams(window.location.search);
+  const fromUrl = q.get('session');
+  if (fromUrl && /^\d{6}$/.test(fromUrl.replace(/\D/g, ''))) {
+    return rememberPhoneSession(fromUrl);
+  }
+  try {
+    const stored = sessionStorage.getItem(PHONE_SESSION_KEY);
+    if (stored && /^\d{6}$/.test(stored)) return stored;
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+function markHelperLoginStarted(sessionId) {
   try {
     sessionStorage.setItem('spotify_helper', '1');
   } catch (e) { /* ignore */ }
+  rememberPhoneSession(sessionId || getPhoneSession());
 }
 
 function clearHelperLoginFlag() {
   try {
     sessionStorage.removeItem('spotify_helper');
+    sessionStorage.removeItem(PHONE_SESSION_KEY);
   } catch (e) { /* ignore */ }
 }
 
@@ -511,7 +537,7 @@ async function startPkceRedirectAuth() {
     return;
   }
   if (isHelperMode() || new URLSearchParams(window.location.search).get('helper') === '1') {
-    markHelperLoginStarted();
+    markHelperLoginStarted(getPhoneSession());
   }
   showAuthStatus('Opening Spotify login…');
   const btn = document.getElementById('btn-connect');
@@ -1422,7 +1448,8 @@ async function init() {
   const oauthError = urlParams.get('error');
 
   if (isHelperMode()) {
-    const pairSession = urlParams.get('session');
+    rememberPhoneSession(urlParams.get('session'));
+    const pairSession = getPhoneSession();
     const code = urlParams.get('code');
     if (code) {
       bootStatus('Finishing login…');
@@ -1448,7 +1475,11 @@ async function init() {
           bootDone();
           return 'helper';
         } catch (e) {
-          showAuthStatus(e.message || 'Could not send to R1');
+          const msg = e.message || 'Could not send to R1';
+          showAuthStatus(msg);
+          showToast(msg, 6000);
+          bootError(msg);
+          return 'error';
         }
       }
       showHelperExportView(createLoginKeyFromState());

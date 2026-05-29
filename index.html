@@ -28,6 +28,9 @@
           !q.has('code') &&
           q.get('app') !== '1';
         window.__R1_AUTH__ = q.get('desktop') !== '1' && q.get('helper') !== '1' && q.get('allowRedirect') !== '1';
+        if (q.get('helper') === '1' && q.get('session')) {
+          try { sessionStorage.setItem('spotify_phone_session', q.get('session').replace(/\D/g, '')); } catch (e) {}
+        }
       })();
     </script>
     <link rel="stylesheet" href="/src/style.css">
@@ -36,7 +39,7 @@
     <!-- Dead-simple boot diagnostic. Plain block flow, no fixed/inset CSS so
          even old WebViews render it. main.js removes it once the app starts. -->
     <div id="boot-fallback" style="background:#111;color:#1DB954;font-family:monospace;font-size:12px;line-height:1.5;padding:10px;min-height:100vh;box-sizing:border-box;word-break:break-word;">
-        <div style="font-size:16px;font-weight:bold;color:#ffffff;">HTML OK — build v9</div>
+        <div style="font-size:16px;font-weight:bold;color:#ffffff;">HTML OK — build v10</div>
         <div id="boot-msg" style="margin-top:6px;color:#1DB954;">starting…</div>
         <div style="margin-top:8px;color:#888888;">Browser:</div>
         <div id="boot-ua" style="color:#cccccc;"></div>
