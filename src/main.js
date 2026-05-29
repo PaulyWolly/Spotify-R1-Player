@@ -51,6 +51,8 @@ const state = {
   albumArtExpanded: false
 };
 
+let deviceAuthActive = false;
+
 // ===========================================
 // Runtime environment (R1 vs browser)
 // ===========================================
@@ -131,6 +133,47 @@ function showAuthStatus(msg) {
   const el = document.getElementById('auth-status');
   if (el) el.textContent = msg || '';
   if (msg) bootStatus(msg);
+}
+
+/** R1 WebView often shows a blank page on Spotify's OAuth redirect — use phone pairing instead. */
+function shouldUseDeviceAuth() {
+  if (runtimeEnv === 'r1') return true;
+  if (window.innerWidth <= 320 && window.self === window.top && !window.__SHELL__) return true;
+  return false;
+}
+
+function configureAuthUIForEnv() {
+  const btn = document.getElementById('btn-connect');
+  const webOnly = document.getElementById('auth-web-only');
+  if (shouldUseDeviceAuth()) {
+    if (btn) btn.textContent = 'Login with phone';
+    if (webOnly) webOnly.classList.add('hidden');
+  } else {
+    if (btn) btn.textContent = 'Connect';
+    if (webOnly) webOnly.classList.remove('hidden');
+    showAuthRedirectHint();
+  }
+}
+
+function showDeviceAuthPanel(show) {
+  const panel = document.getElementById('auth-device-panel');
+  if (panel) panel.classList.toggle('hidden', !show);
+}
+
+function resetDeviceAuthUI() {
+  const btn = document.getElementById('btn-connect');
+  const cancelBtn = document.getElementById('btn-cancel-device');
+  if (btn) btn.disabled = false;
+  if (cancelBtn) cancelBtn.classList.add('hidden');
+  showDeviceAuthPanel(false);
+}
+
+function stopDeviceAuth() {
+  deviceAuthActive = false;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ===========================================
@@ -257,6 +300,149 @@ async function clearCodeVerifier() {
 }
 
 async function startAuth() {
+  if (shouldUseDeviceAuth()) {
+    return startDeviceAuth();
+  }
+  return startPkceRedirectAuth();
+}
+
+/** Phone/computer pairing — works on R1 where OAuth redirect pages are blank. */
+async function startDeviceAuth() {
+  stopDeviceAuth();
+  deviceAuthActive = true;
+  showDeviceAuthPanel(true);
+  showAuthStatus('Getting login code…');
+
+  const btn = document.getElementById('btn-connect');
+  const cancelBtn = document.getElementById('btn-cancel-device');
+  if (btn) btn.disabled = true;
+  if (cancelBtn) cancelBtn.classList.remove('hidden');
+
+  let deviceRes;
+  try {
+    deviceRes = await fetch('https://accounts.spotify.com/api/device_authorization', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: SPOTIFY_CLIENT_ID,
+        scope: SPOTIFY_SCOPES
+      })
+    });
+  } catch (e) {
+    stopDeviceAuth();
+    resetDeviceAuthUI();
+    const msg = 'Network error — check Wi‑Fi';
+    showAuthStatus(msg);
+    bootError(msg);
+    return;
+  }
+
+  if (!deviceRes.ok) {
+    stopDeviceAuth();
+    resetDeviceAuthUI();
+    let detail = 'Could not start login';
+    try {
+      const err = await deviceRes.json();
+      if (err.error_description) detail = err.error_description;
+      else if (err.error) detail = err.error;
+    } catch (e) { /* ignore */ }
+    showAuthStatus(detail);
+    bootError(detail);
+    return;
+  }
+
+  const deviceData = await deviceRes.json();
+  const userCodeEl = document.getElementById('device-user-code');
+  if (userCodeEl) userCodeEl.textContent = deviceData.user_code || '----';
+
+  const deviceCode = deviceData.device_code;
+  const expiresAt = Date.now() + (deviceData.expires_in || 600) * 1000;
+  let intervalSec = deviceData.interval || 5;
+
+  showAuthStatus('Enter code on your phone…');
+
+  while (deviceAuthActive && Date.now() < expiresAt) {
+    await sleep(intervalSec * 1000);
+    if (!deviceAuthActive) break;
+
+    let tokenRes;
+    try {
+      tokenRes = await fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: SPOTIFY_CLIENT_ID,
+          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+          device_code: deviceCode
+        })
+      });
+    } catch (e) {
+      showAuthStatus('Retrying…');
+      continue;
+    }
+
+    if (tokenRes.ok) {
+      const data = await tokenRes.json();
+      state.accessToken = data.access_token;
+      state.refreshToken = data.refresh_token;
+      state.tokenExpiry = Date.now() + (data.expires_in * 1000);
+      await saveTokens();
+      stopDeviceAuth();
+      resetDeviceAuthUI();
+      showAuthStatus('');
+      initPlayer();
+      showView('player');
+      fetchPlaylists();
+      startProgressTimer();
+      bootDone();
+      return;
+    }
+
+    let errBody = {};
+    try {
+      errBody = await tokenRes.json();
+    } catch (e) { /* ignore */ }
+    const err = errBody.error;
+
+    if (err === 'authorization_pending') {
+      showAuthStatus('Waiting for you to approve…');
+      continue;
+    }
+    if (err === 'slow_down') {
+      intervalSec += 5;
+      continue;
+    }
+    if (err === 'access_denied') {
+      showAuthStatus('Login cancelled');
+      break;
+    }
+    if (err === 'expired_token') {
+      showAuthStatus('Code expired — try again');
+      break;
+    }
+
+    showAuthStatus(errBody.error_description || err || 'Login failed');
+    bootError(errBody.error_description || err || 'Login failed');
+    break;
+  }
+
+  if (deviceAuthActive && Date.now() >= expiresAt) {
+    showAuthStatus('Code expired — tap Login again');
+  }
+
+  stopDeviceAuth();
+  resetDeviceAuthUI();
+}
+
+function cancelDeviceAuth() {
+  stopDeviceAuth();
+  resetDeviceAuthUI();
+  showAuthStatus('Login cancelled');
+  showView('auth');
+}
+
+/** Browser / desktop OAuth redirect (PKCE). */
+async function startPkceRedirectAuth() {
   showAuthStatus('Opening Spotify login…');
   const btn = document.getElementById('btn-connect');
   if (btn) btn.disabled = true;
@@ -286,8 +472,6 @@ async function startAuth() {
   });
 
   const authUrl = `https://accounts.spotify.com/authorize?${params.toString()}`;
-  // If running inside the desktop preview frame, break out to the top window
-  // so Spotify's login page (which blocks being framed) loads normally.
   if (window.self !== window.top) {
     window.top.location.href = authUrl;
   } else {
@@ -1170,7 +1354,7 @@ async function init() {
     const msg = 'Spotify login cancelled: ' + oauthError;
     showAuthStatus(msg);
     showView('auth');
-    showAuthRedirectHint();
+    configureAuthUIForEnv();
     window.history.replaceState({}, document.title, SPOTIFY_REDIRECT_URI);
     bootError(msg);
     return 'error';
@@ -1189,7 +1373,7 @@ async function init() {
       return 'player';
     }
     showView('auth');
-    showAuthRedirectHint();
+    configureAuthUIForEnv();
     const btn = document.getElementById('btn-connect');
     if (btn) btn.disabled = false;
     return 'error';
@@ -1214,7 +1398,7 @@ async function init() {
   }
 
   showView('auth');
-  showAuthRedirectHint();
+  configureAuthUIForEnv();
   console.info(`[Spotify R1] env=${runtimeEnv} — Redirect URI:`, SPOTIFY_REDIRECT_URI);
   return 'auth';
 }
@@ -1279,6 +1463,7 @@ document.addEventListener('DOMContentLoaded', () => {
 function wireControls() {
   // Connect button
   document.getElementById('btn-connect').addEventListener('click', startAuth);
+  document.getElementById('btn-cancel-device').addEventListener('click', cancelDeviceAuth);
 
   document.getElementById('btn-play').addEventListener('click', togglePlay);
   document.getElementById('btn-first').addEventListener('click', firstTrack);
@@ -1338,5 +1523,5 @@ function wireControls() {
     });
   }
 
-  showAuthRedirectHint();
+  configureAuthUIForEnv();
 }
