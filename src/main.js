@@ -51,10 +51,12 @@ const state = {
   albumArtExpanded: false,
   audioUnlocked: false,
   activeDeviceId: null,
-  playbackErrorMuteUntil: 0
+  playbackErrorMuteUntil: 0,
+  lastApiProgressMs: null
 };
 
 let companionPollTimer = null;
+let r1ApiSyncInterval = null;
 let cachedPairSession = null;
 let companionLoginStarted = false;
 
@@ -1078,9 +1080,15 @@ async function transferPlayback(deviceId) {
   if (!result?._error) state.activeDeviceId = deviceId;
 }
 
-async function syncNowPlayingFromApi() {
+async function fetchPlayerSnapshot() {
   const data = await spotifyFetch('/me/player');
-  if (!data || data._error || !data.item) return;
+  if (!data || data._error || !data.item) return null;
+  return data;
+}
+
+async function syncNowPlayingFromApi() {
+  const data = await fetchPlayerSnapshot();
+  if (!data) return;
 
   if (
     runtimeEnv === 'r1' &&
@@ -1098,8 +1106,25 @@ async function syncNowPlayingFromApi() {
     }
   }
 
-  state.isPlaying = !!data.is_playing;
-  state.progressMs = data.progress_ms || 0;
+  const apiProg = data.progress_ms || 0;
+  let playing = !!data.is_playing;
+  if (
+    runtimeEnv === 'r1' &&
+    !playing &&
+    state.lastApiProgressMs != null &&
+    apiProg > state.lastApiProgressMs + 700
+  ) {
+    playing = true;
+  }
+  state.lastApiProgressMs = apiProg;
+  state.isPlaying = playing;
+
+  if (runtimeEnv === 'r1' && playing) {
+    const drift = Math.abs(apiProg - state.progressMs);
+    if (drift > 2500) state.progressMs = apiProg;
+  } else {
+    state.progressMs = apiProg;
+  }
   state.durationMs = data.item.duration_ms || 0;
   state.currentTrack = {
     name: data.item.name,
@@ -1225,33 +1250,36 @@ async function togglePlay() {
   if (!(await ensurePlayerFromGesture())) return;
   await preparePlaybackForUserAction();
 
-  if (!state.currentTrack?.uri && !state.currentPlaylistTracks.length) {
+  const snap = await fetchPlayerSnapshot();
+  const playing = snap ? !!snap.is_playing : state.isPlaying;
+
+  if (!snap?.item && !state.currentTrack?.uri && !state.currentPlaylistTracks.length) {
     const started = await startDefaultPlayback();
     if (!started) showToast('Open ☰ and pick a playlist', 4000);
     return;
   }
 
-  // R1 WebView: SDK state is often missing — use API + UI state for play/pause.
-  if (state.isPlaying) {
-    const paused = await apiPausePlayback();
-    if (!paused && state.player) {
+  if (playing) {
+    await apiPausePlayback();
+    if (state.player) {
       try { await state.player.pause(); } catch (e) { /* ignore */ }
     }
   } else {
     const ok = await apiResumePlayback();
-    if (!ok) {
-      if (state.currentPlaylistTracks.length > 0) {
-        await playTrackUris(state.currentPlaylistTracks.map((t) => t.uri), 0);
-      } else if (state.currentTrack?.uri) {
-        await playTrackUris([state.currentTrack.uri], 0);
-      } else {
-        showToast('Pick a song first (☰)', 4000);
-        return;
-      }
+    if (!ok && state.currentPlaylistTracks.length > 0) {
+      await playTrackUris(state.currentPlaylistTracks.map((t) => t.uri), 0);
+    } else if (!ok && state.currentTrack?.uri) {
+      await playTrackUris([state.currentTrack.uri], 0);
+    } else if (!ok) {
+      showToast('Nothing to play — open ☰', 4000);
+      return;
     }
     await startR1LocalAudio();
+    if (state.player) {
+      try { await state.player.resume(); } catch (e) { /* ignore */ }
+    }
   }
-  await syncNowPlayingFromApi();
+  setTimeout(() => syncNowPlayingFromApi(), 400);
 }
 
 async function nextTrack() {
@@ -1661,8 +1689,16 @@ function updateProgress() {
 
 function startProgressTimer() {
   if (state.progressInterval) clearInterval(state.progressInterval);
+  if (r1ApiSyncInterval) clearInterval(r1ApiSyncInterval);
   if (runtimeEnv === 'r1') {
-    state.progressInterval = setInterval(() => syncNowPlayingFromApi(), 1500);
+    state.progressInterval = setInterval(() => {
+      if (state.isPlaying && state.durationMs > 0) {
+        state.progressMs += 500;
+        if (state.progressMs > state.durationMs) state.progressMs = state.durationMs;
+        updateProgress();
+      }
+    }, 500);
+    r1ApiSyncInterval = setInterval(() => syncNowPlayingFromApi(), 4000);
     return;
   }
   state.progressInterval = setInterval(() => {
