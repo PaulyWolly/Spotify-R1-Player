@@ -48,7 +48,10 @@ const state = {
   wasPlayingBeforeVoice: false,
   isListening: false,
   progressInterval: null,
-  albumArtExpanded: false
+  albumArtExpanded: false,
+  audioUnlocked: false,
+  activeDeviceId: null,
+  playbackErrorMuteUntil: 0
 };
 
 let companionPollTimer = null;
@@ -106,6 +109,27 @@ function playerPlayEndpoint() {
   const base = '/me/player/play';
   if (!state.deviceId) return base;
   return `${base}?device_id=${encodeURIComponent(state.deviceId)}`;
+}
+
+function playerDeviceQuery() {
+  if (!state.deviceId) return '';
+  return `?device_id=${encodeURIComponent(state.deviceId)}`;
+}
+
+function waitForSpotifySdk(timeoutMs = 15000) {
+  if (typeof Spotify !== 'undefined') return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const tick = setInterval(() => {
+      if (typeof Spotify !== 'undefined') {
+        clearInterval(tick);
+        resolve(true);
+      } else if (Date.now() - start > timeoutMs) {
+        clearInterval(tick);
+        resolve(false);
+      }
+    }, 150);
+  });
 }
 
 function waitForDevice(timeoutMs = 12000) {
@@ -261,6 +285,7 @@ async function applyTokenPayload(tokens) {
   await saveTokens();
   showAuthStatus('');
   initPlayer();
+  installR1AudioUnlock();
   showView('player');
   fetchPlaylists();
   startProgressTimer();
@@ -723,6 +748,18 @@ async function spotifyFetch(endpoint, options = {}) {
 // ===========================================
 
 function initPlayer() {
+  if (state.player) return;
+  // R1 WebView: create Spotify.Player only on first user tap (autoplay/DRM rules).
+  if (runtimeEnv === 'r1') {
+    if (typeof Spotify !== 'undefined') {
+      state._spotifySdkLoaded = true;
+    } else if (!window.onSpotifyWebPlaybackSDKReady) {
+      window.onSpotifyWebPlaybackSDKReady = () => {
+        state._spotifySdkLoaded = true;
+      };
+    }
+    return;
+  }
   if (typeof Spotify === 'undefined') {
     window.onSpotifyWebPlaybackSDKReady = () => setupPlayer();
     return;
@@ -730,24 +767,115 @@ function initPlayer() {
   setupPlayer();
 }
 
+/** Connect Web Playback SDK from a button tap (required on R1). */
+async function ensurePlayerFromGesture() {
+  if (state.player && state.deviceId) {
+    await unlockWebAudio();
+    return true;
+  }
+
+  if (runtimeEnv === 'r1' && !state.player) {
+    const sdkOk = await waitForSpotifySdk(15000);
+    if (!sdkOk) {
+      showToast('Spotify player SDK did not load', 5000);
+      return false;
+    }
+    setupPlayer();
+  } else if (!state.player) {
+    initPlayer();
+    if (!state.player && typeof Spotify !== 'undefined') setupPlayer();
+  }
+
+  if (!state.player) {
+    showToast('Player not available', 4000);
+    return false;
+  }
+
+  await unlockWebAudio();
+  const ready = await waitForDevice(runtimeEnv === 'r1' ? 25000 : 12000);
+  if (!ready) showToast('Connecting player… tap again', 4000);
+  return ready;
+}
+
+/** Mobile / WebView: unlock audio output (must run during a user gesture). */
+async function unlockWebAudio() {
+  if (!state.player || state.audioUnlocked) return;
+  try {
+    if (typeof state.player.activateElement === 'function') {
+      await state.player.activateElement();
+    }
+    state.audioUnlocked = true;
+  } catch (e) {
+    console.warn('activateElement:', e);
+  }
+}
+
+async function ensurePlaybackDevice() {
+  if (!state.deviceId) return false;
+  if (state.activeDeviceId === state.deviceId) return true;
+  await transferPlayback(state.deviceId);
+  return state.activeDeviceId === state.deviceId;
+}
+
+/** R1 only: unlock audio + transfer once. Avoid re-transfer on every tap (causes playback_error). */
+async function preparePlaybackForUserAction() {
+  if (runtimeEnv !== 'r1') return;
+  await unlockWebAudio();
+  await ensurePlaybackDevice();
+}
+
+async function resumeLocalPlayback() {
+  if (!state.player) return;
+  try {
+    const cur = await state.player.getCurrentState();
+    if (cur?.paused) await state.player.resume();
+  } catch (e) {
+    console.warn('resumeLocalPlayback:', e);
+  }
+}
+
+function installR1AudioUnlock() {
+  if (runtimeEnv !== 'r1' || state._r1UnlockInstalled) return;
+  state._r1UnlockInstalled = true;
+  const onGesture = () => {
+    unlockWebAudio();
+  };
+  document.addEventListener('click', onGesture, true);
+  document.addEventListener('touchstart', onGesture, { capture: true, passive: true });
+}
+
 function setupPlayer() {
+  if (state.player) return;
   const player = new Spotify.Player({
     name: 'R1 Device',
     getOAuthToken: async (cb) => {
       const token = await getValidToken();
+      if (!token) {
+        showView('auth');
+        return;
+      }
       cb(token);
     },
     volume: 0.8
   });
 
-  player.addListener('ready', ({ device_id }) => {
+  player.addListener('ready', async ({ device_id }) => {
     state.deviceId = device_id;
     console.log('Spotify player ready, device:', device_id);
-    transferPlayback(device_id);
+    try {
+      await player.setVolume(0.8);
+    } catch (e) { /* ignore */ }
+    await transferPlayback(device_id);
+    syncNowPlayingFromApi();
+    if (runtimeEnv === 'r1') {
+      showToast('Open ☰ pick a song, then ▶', 3500);
+    }
   });
 
   player.addListener('not_ready', ({ device_id }) => {
     console.log('Device offline:', device_id);
+    state.deviceId = null;
+    state.activeDeviceId = null;
   });
 
   player.addListener('player_state_changed', (playerState) => {
@@ -759,29 +887,105 @@ function setupPlayer() {
     console.error('Init error:', message);
     const hint = /premium/i.test(message)
       ? 'Spotify Premium required'
-      : 'Player init error';
-    showToast(hint, 4000);
+      : (message ? String(message).slice(0, 72) : 'Player init error');
+    showToast(hint, 5000);
   });
 
   player.addListener('authentication_error', ({ message }) => {
     console.error('Auth error:', message);
+    showToast(message ? String(message).slice(0, 72) : 'Player auth error', 4000);
     showView('auth');
+  });
+
+  player.addListener('autoplay_failed', () => {
+    state.audioUnlocked = false;
+    showToast('Tap ▶ or scroll to start audio', 4000);
   });
 
   player.addListener('playback_error', ({ message }) => {
     console.error('Playback error:', message);
-    showToast('Playback error');
+    if (Date.now() < state.playbackErrorMuteUntil) return;
+    const hint = message ? String(message).slice(0, 72) : 'Playback error';
+    showToast(hint, 5000);
   });
 
-  player.connect();
   state.player = player;
+  const connected = player.connect();
+  if (connected && typeof connected.then === 'function') {
+    connected.then((ok) => {
+      if (!ok) {
+        console.error('Spotify connect failed');
+        showToast('Could not connect player — retry', 4000);
+      }
+    });
+  }
 }
 
 async function transferPlayback(deviceId) {
-  await spotifyFetch('/me/player', {
+  if (!deviceId || state.activeDeviceId === deviceId) return;
+  state.playbackErrorMuteUntil = Date.now() + 2500;
+  const result = await spotifyFetch('/me/player', {
     method: 'PUT',
     body: JSON.stringify({ device_ids: [deviceId], play: false })
   });
+  if (!result?._error) state.activeDeviceId = deviceId;
+}
+
+async function syncNowPlayingFromApi() {
+  const data = await spotifyFetch('/me/player');
+  if (!data || data._error || !data.item) return;
+  state.isPlaying = !!data.is_playing;
+  state.progressMs = data.progress_ms || 0;
+  state.durationMs = data.item.duration_ms || 0;
+  state.currentTrack = {
+    name: data.item.name,
+    artist: (data.item.artists || []).map((a) => a.name).join(', '),
+    albumArt: data.item.album?.images?.[0]?.url || '',
+    uri: data.item.uri
+  };
+  if (data.context?.uri) state.playingPlaylistUri = data.context.uri;
+  updatePlayerUI();
+  updatePlayButton();
+  updateProgress();
+}
+
+async function apiResumePlayback() {
+  const result = await spotifyFetch(`/me/player/play${playerDeviceQuery()}`, { method: 'PUT' });
+  if (result?._error) {
+    showToast(result._error, 3500);
+    return false;
+  }
+  state.isPlaying = true;
+  updatePlayButton();
+  return true;
+}
+
+async function apiPausePlayback() {
+  const result = await spotifyFetch(`/me/player/pause${playerDeviceQuery()}`, { method: 'PUT' });
+  if (result?._error) return false;
+  state.isPlaying = false;
+  updatePlayButton();
+  return true;
+}
+
+async function startDefaultPlayback() {
+  if (state.currentPlaylistTracks.length > 0) {
+    return playTrackUris(state.currentPlaylistTracks.map((t) => t.uri), 0);
+  }
+  if (state.currentPlaylistUri) {
+    return playContext(state.currentPlaylistUri, 0);
+  }
+  const pl = state.playlists[0];
+  if (!pl) return false;
+  showToast('Loading playlist…', 2000);
+  await fetchPlaylistTracks(pl.id, pl.name, pl.uri, pl.owned);
+  if (state.currentPlaylistTracks.length > 0) {
+    return playTrackUris(state.currentPlaylistTracks.map((t) => t.uri), 0);
+  }
+  if (state.currentPlaylistUri) {
+    return playContext(state.currentPlaylistUri, 0);
+  }
+  return false;
 }
 
 function handlePlayerStateChange(playerState) {
@@ -824,19 +1028,104 @@ function handlePlayerStateChange(playerState) {
 // Playback Controls
 // ===========================================
 
+async function ensureBrowserPlayer() {
+  if (!state.player) initPlayer();
+  return waitForDevice(12000);
+}
+
 async function togglePlay() {
-  if (!state.player) return;
-  await state.player.togglePlay();
+  if (runtimeEnv !== 'r1') {
+    if (!(await ensureBrowserPlayer()) || !state.player) {
+      showToast('Player connecting… wait and tap again', 3500);
+      return;
+    }
+    let cur = null;
+    try {
+      cur = await state.player.getCurrentState();
+    } catch (e) {
+      console.warn('getCurrentState:', e);
+    }
+    if (!cur?.track_window?.current_track) {
+      const started = await startDefaultPlayback();
+      if (!started) showToast('Open ☰ and pick a playlist', 4000);
+      return;
+    }
+    try {
+      await state.player.togglePlay();
+    } catch (e) {
+      showToast('Could not toggle playback', 3500);
+    }
+    return;
+  }
+
+  if (!(await ensurePlayerFromGesture())) return;
+  await preparePlaybackForUserAction();
+
+  let cur = null;
+  try {
+    cur = await state.player.getCurrentState();
+  } catch (e) {
+    console.warn('getCurrentState:', e);
+  }
+
+  if (!cur?.track_window?.current_track) {
+    const started = await startDefaultPlayback();
+    if (!started) showToast('Open ☰ and pick a playlist', 4000);
+    return;
+  }
+
+  if (cur.paused) {
+    const ok = await apiResumePlayback();
+    if (!ok) {
+      try {
+        await state.player.resume();
+        state.isPlaying = true;
+        updatePlayButton();
+      } catch (e) {
+        showToast('Could not start playback', 4000);
+      }
+    }
+    return;
+  }
+
+  const paused = await apiPausePlayback();
+  if (!paused) {
+    try {
+      await state.player.pause();
+      state.isPlaying = false;
+      updatePlayButton();
+    } catch (e) {
+      showToast('Could not pause', 3000);
+    }
+  }
 }
 
 async function nextTrack() {
-  if (!state.player) return;
-  await state.player.nextTrack();
+  if (runtimeEnv !== 'r1') {
+    if (!state.player) return;
+    try { await state.player.nextTrack(); } catch (e) { /* ignore */ }
+    return;
+  }
+  if (!(await ensurePlayerFromGesture())) return;
+  await preparePlaybackForUserAction();
+  const result = await spotifyFetch(`/me/player/next${playerDeviceQuery()}`, { method: 'POST' });
+  if (result?._error && state.player) {
+    try { await state.player.nextTrack(); } catch (e) { /* ignore */ }
+  }
 }
 
 async function prevTrack() {
-  if (!state.player) return;
-  await state.player.previousTrack();
+  if (runtimeEnv !== 'r1') {
+    if (!state.player) return;
+    try { await state.player.previousTrack(); } catch (e) { /* ignore */ }
+    return;
+  }
+  if (!(await ensurePlayerFromGesture())) return;
+  await preparePlaybackForUserAction();
+  const result = await spotifyFetch(`/me/player/previous${playerDeviceQuery()}`, { method: 'POST' });
+  if (result?._error && state.player) {
+    try { await state.player.previousTrack(); } catch (e) { /* ignore */ }
+  }
 }
 
 /** |◀◀ — jump to the start of the current playlist/list. */
@@ -887,9 +1176,15 @@ async function playAllCurrent() {
 }
 
 async function playContext(contextUri, offset = 0) {
-  if (!(await waitForDevice())) {
-    showToast('Player not ready — wait a moment');
-    return false;
+  if (runtimeEnv === 'r1') {
+    if (!(await ensurePlayerFromGesture())) return false;
+    await preparePlaybackForUserAction();
+  } else {
+    if (!(await ensureBrowserPlayer())) {
+      showToast('Player not ready — wait a moment', 3500);
+      return false;
+    }
+    await ensurePlaybackDevice();
   }
   const result = await spotifyFetch(playerPlayEndpoint(), {
     method: 'PUT',
@@ -902,13 +1197,20 @@ async function playContext(contextUri, offset = 0) {
     showToast(result._error, 3500);
     return false;
   }
+  syncNowPlayingFromApi();
   return true;
 }
 
 async function playTrackUris(uris, offset = 0) {
-  if (!(await waitForDevice())) {
-    showToast('Player not ready — wait a moment');
-    return false;
+  if (runtimeEnv === 'r1') {
+    if (!(await ensurePlayerFromGesture())) return false;
+    await preparePlaybackForUserAction();
+  } else {
+    if (!(await ensureBrowserPlayer())) {
+      showToast('Player not ready — wait a moment', 3500);
+      return false;
+    }
+    await ensurePlaybackDevice();
   }
   const result = await spotifyFetch(playerPlayEndpoint(), {
     method: 'PUT',
@@ -921,6 +1223,17 @@ async function playTrackUris(uris, offset = 0) {
     showToast(result._error, 3500);
     return false;
   }
+  const track = state.currentPlaylistTracks[offset];
+  if (track) {
+    state.currentTrack = {
+      name: track.name,
+      artist: track.artist,
+      albumArt: track.albumArt || '',
+      uri: track.uri
+    };
+    updatePlayerUI();
+  }
+  syncNowPlayingFromApi();
   return true;
 }
 
@@ -931,6 +1244,7 @@ async function pausePlayback() {
 
 async function resumePlayback() {
   if (!state.player) return;
+  if (runtimeEnv === 'r1') await preparePlaybackForUserAction();
   await state.player.resume();
 }
 
@@ -1512,6 +1826,7 @@ async function init() {
     const success = await handleAuthCallback(code);
     if (success) {
       initPlayer();
+      installR1AudioUnlock();
       showView('player');
       fetchPlaylists();
       startProgressTimer();
@@ -1534,6 +1849,7 @@ async function init() {
     const sessionOk = tokenValid || (await refreshAccessToken());
     if (sessionOk && state.accessToken) {
       initPlayer();
+      installR1AudioUnlock();
       showView('player');
       fetchPlaylists();
       startProgressTimer();
@@ -1605,18 +1921,33 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
+/** R1 WebView: touchend + click (deduped); avoids missed taps on tiny buttons. */
+function bindTap(el, handler) {
+  if (!el) return;
+  let lastFire = 0;
+  const run = (e) => {
+    const now = Date.now();
+    if (now - lastFire < 350) return;
+    lastFire = now;
+    if (e.cancelable) e.preventDefault();
+    handler();
+  };
+  el.addEventListener('click', run);
+  el.addEventListener('touchend', run, { passive: false });
+}
+
 function wireControls() {
   // Connect button
   document.getElementById('btn-connect').addEventListener('click', startAuth);
   document.getElementById('btn-import-key').addEventListener('click', importLoginKeyFromInput);
 
-  document.getElementById('btn-play').addEventListener('click', togglePlay);
-  document.getElementById('btn-first').addEventListener('click', firstTrack);
-  document.getElementById('btn-prev').addEventListener('click', prevTrack);
-  document.getElementById('btn-next').addEventListener('click', nextTrack);
-  document.getElementById('btn-last').addEventListener('click', lastTrack);
-  document.getElementById('btn-library').addEventListener('click', openPlaylistBrowser);
-  document.getElementById('btn-play-all').addEventListener('click', playAllCurrent);
+  bindTap(document.getElementById('btn-play'), () => togglePlay());
+  bindTap(document.getElementById('btn-first'), () => firstTrack());
+  bindTap(document.getElementById('btn-prev'), () => prevTrack());
+  bindTap(document.getElementById('btn-next'), () => nextTrack());
+  bindTap(document.getElementById('btn-last'), () => lastTrack());
+  bindTap(document.getElementById('btn-library'), () => openPlaylistBrowser());
+  bindTap(document.getElementById('btn-play-all'), () => playAllCurrent());
 
   const playbackStatus = document.getElementById('playback-status');
   playbackStatus.addEventListener('click', openCurrentPlayingList);
