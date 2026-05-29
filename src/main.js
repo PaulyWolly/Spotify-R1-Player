@@ -280,40 +280,63 @@ async function applyTokenPayload(tokens) {
   state.tokenExpiry = tokens.tokenExpiry || 0;
   if (!state.accessToken || state.tokenExpiry - Date.now() < 60000) {
     const ok = await refreshAccessToken();
-    if (!ok) throw new Error('token refresh failed');
+    if (!ok) throw new Error('token refresh failed — log in on phone again');
   }
   await saveTokens();
-  showAuthStatus('');
-  initPlayer();
-  installR1AudioUnlock();
+  stopCompanionPolling();
+  showAuthStatus('Connected!');
   showView('player');
-  fetchPlaylists();
-  startProgressTimer();
   bootDone();
+  try {
+    initPlayer();
+    installR1AudioUnlock();
+    fetchPlaylists();
+    startProgressTimer();
+  } catch (e) {
+    console.error('applyTokenPayload player:', e);
+    showToast('Logged in — tap a song to play', 4000);
+  }
 }
 
 async function pollAuthSession(sessionId) {
-  const url = '/.netlify/functions/auth-poll?session=' + encodeURIComponent(sessionId);
-  const res = await fetch(url);
-  const data = await res.json();
-  if (data.ok && data.tokens) {
-    stopCompanionPolling();
-    await applyTokenPayload(data.tokens);
-    return true;
+  try {
+    const url = '/.netlify/functions/auth-poll?session=' + encodeURIComponent(sessionId);
+    const res = await fetch(url);
+    if (!res.ok) {
+      showAuthStatus('Login check failed (' + res.status + ')');
+      return false;
+    }
+    const data = await res.json();
+    if (data.ok && data.tokens) {
+      await applyTokenPayload(data.tokens);
+      return true;
+    }
+    if (data.error) showAuthStatus(data.error);
+    return false;
+  } catch (e) {
+    showAuthStatus('Network error — tap Check login');
+    return false;
   }
-  if (data.error) {
-    showAuthStatus(data.error);
+}
+
+async function checkCompanionLogin() {
+  const sessionId = await getOrCreateAuthSession();
+  const pairEl = document.getElementById('pair-code');
+  if (pairEl) pairEl.textContent = sessionId;
+  showAuthStatus('Checking phone login…');
+  const ok = await pollAuthSession(sessionId);
+  if (!ok) {
+    showAuthStatus('Waiting — use code ' + sessionId + ' on phone (see URL above)');
   }
-  return false;
 }
 
 function startCompanionAuthPolling(sessionId) {
   stopCompanionPolling();
-  showAuthStatus('Waiting for phone login…');
+  showAuthStatus('Waiting for phone — code ' + sessionId);
   pollAuthSession(sessionId);
   companionPollTimer = setInterval(function () {
     pollAuthSession(sessionId);
-  }, 3000);
+  }, 2000);
 }
 
 async function publishTokensToSession(sessionId) {
@@ -1954,6 +1977,7 @@ async function init() {
 
   const tokens = await loadTokens();
   if (tokens?.accessToken && tokens?.refreshToken) {
+    stopCompanionPolling();
     state.accessToken = tokens.accessToken;
     state.refreshToken = tokens.refreshToken;
     state.tokenExpiry = tokens.tokenExpiry || 0;
@@ -1961,14 +1985,16 @@ async function init() {
     const tokenValid = state.tokenExpiry - Date.now() > 60000;
     const sessionOk = tokenValid || (await refreshAccessToken());
     if (sessionOk && state.accessToken) {
+      showView('player');
+      bootDone();
       initPlayer();
       installR1AudioUnlock();
-      showView('player');
       fetchPlaylists();
       startProgressTimer();
       return 'player';
     }
     await clearTokens();
+    showAuthStatus('Session expired — log in on phone again');
   }
 
   showView('auth');
@@ -2054,6 +2080,10 @@ function wireControls() {
   // Connect button
   document.getElementById('btn-connect').addEventListener('click', startAuth);
   document.getElementById('btn-import-key').addEventListener('click', importLoginKeyFromInput);
+  const btnCheckLogin = document.getElementById('btn-check-login');
+  if (btnCheckLogin) {
+    bindTap(btnCheckLogin, () => checkCompanionLogin());
+  }
 
   bindTap(document.getElementById('btn-play'), () => togglePlay());
   bindTap(document.getElementById('btn-first'), () => firstTrack());
@@ -2113,5 +2143,4 @@ function wireControls() {
     });
   }
 
-  configureAuthUIForEnv();
 }

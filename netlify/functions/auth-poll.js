@@ -27,7 +27,7 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers: cors, body: JSON.stringify({ pending: true }) };
     }
 
-    await store.delete(session);
+    // Do not delete — R1 may need several polls; entry expires via store TTL metadata.
     const tokens = JSON.parse(raw);
     return { statusCode: 200, headers: cors, body: JSON.stringify({ ok: true, tokens }) };
   } catch (e) {

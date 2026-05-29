@@ -112,6 +112,12 @@ html, body {
     min-height: 0;
 }
 
+#btn-check-login {
+    margin-top: 1.5vh;
+    width: 100%;
+    max-width: 100%;
+}
+
 .btn-primary {
     min-width: 44px;
     min-height: 36px;
