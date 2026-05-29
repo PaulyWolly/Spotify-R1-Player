@@ -51,8 +51,6 @@ const state = {
   albumArtExpanded: false
 };
 
-let deviceAuthActive = false;
-
 // ===========================================
 // Runtime environment (R1 vs browser)
 // ===========================================
@@ -135,45 +133,137 @@ function showAuthStatus(msg) {
   if (msg) bootStatus(msg);
 }
 
-/** R1 WebView often shows a blank page on Spotify's OAuth redirect — use phone pairing instead. */
-function shouldUseDeviceAuth() {
-  if (runtimeEnv === 'r1') return true;
-  if (window.innerWidth <= 320 && window.self === window.top && !window.__SHELL__) return true;
+/** Phone helper page (?helper=1) — PKCE works in normal mobile/desktop browsers. */
+function isHelperMode() {
+  const q = new URLSearchParams(window.location.search);
+  if (q.get('helper') === '1') return true;
+  if (q.has('code')) {
+    try {
+      return sessionStorage.getItem('spotify_helper') === '1';
+    } catch (e) { /* ignore */ }
+  }
   return false;
 }
 
-function configureAuthUIForEnv() {
-  const btn = document.getElementById('btn-connect');
-  const webOnly = document.getElementById('auth-web-only');
-  if (shouldUseDeviceAuth()) {
-    if (btn) btn.textContent = 'Login with phone';
-    if (webOnly) webOnly.classList.add('hidden');
-  } else {
-    if (btn) btn.textContent = 'Connect';
-    if (webOnly) webOnly.classList.remove('hidden');
-    showAuthRedirectHint();
+function markHelperLoginStarted() {
+  try {
+    sessionStorage.setItem('spotify_helper', '1');
+  } catch (e) { /* ignore */ }
+}
+
+function clearHelperLoginFlag() {
+  try {
+    sessionStorage.removeItem('spotify_helper');
+  } catch (e) { /* ignore */ }
+}
+
+/** R1 WebView cannot load Spotify's login page — use phone helper + paste key. */
+function isCompanionAuthMode() {
+  if (window.__SHELL__) return false;
+  if (isHelperMode()) return false;
+  if (new URLSearchParams(window.location.search).get('desktop') === '1') return false;
+  return true;
+}
+
+function getHelperLoginUrl() {
+  try {
+    const u = new URL(SPOTIFY_REDIRECT_URI);
+    u.search = '';
+    u.hash = '';
+    u.searchParams.set('helper', '1');
+    return u.toString();
+  } catch (e) {
+    return SPOTIFY_REDIRECT_URI.split('?')[0] + '?helper=1';
   }
 }
 
-function showDeviceAuthPanel(show) {
-  const panel = document.getElementById('auth-device-panel');
-  if (panel) panel.classList.toggle('hidden', !show);
+function createLoginKeyFromState() {
+  return btoa(JSON.stringify({
+    accessToken: state.accessToken,
+    refreshToken: state.refreshToken,
+    tokenExpiry: state.tokenExpiry
+  }));
 }
 
-function resetDeviceAuthUI() {
-  const btn = document.getElementById('btn-connect');
-  const cancelBtn = document.getElementById('btn-cancel-device');
-  if (btn) btn.disabled = false;
-  if (cancelBtn) cancelBtn.classList.add('hidden');
-  showDeviceAuthPanel(false);
+function showHelperExportView(key) {
+  clearHelperLoginFlag();
+  const exportView = document.getElementById('view-helper-export');
+  const ta = document.getElementById('login-key-export');
+  if (ta) ta.value = key;
+  document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
+  if (exportView) exportView.classList.add('active');
 }
 
-function stopDeviceAuth() {
-  deviceAuthActive = false;
+function configureAuthUIForEnv() {
+  const btnConnect = document.getElementById('btn-connect');
+  const btnImport = document.getElementById('btn-import-key');
+  const webOnly = document.getElementById('auth-web-only');
+  const r1Panel = document.getElementById('auth-r1-panel');
+  const helperUrl = document.getElementById('helper-login-url');
+
+  if (isHelperMode()) {
+    if (btnConnect) {
+      btnConnect.textContent = 'Connect';
+      btnConnect.classList.remove('hidden');
+    }
+    if (btnImport) btnImport.classList.add('hidden');
+    if (webOnly) webOnly.classList.remove('hidden');
+    if (r1Panel) r1Panel.classList.add('hidden');
+    showAuthRedirectHint();
+    return;
+  }
+
+  if (isCompanionAuthMode()) {
+    if (btnConnect) btnConnect.classList.add('hidden');
+    if (btnImport) btnImport.classList.remove('hidden');
+    if (webOnly) webOnly.classList.add('hidden');
+    if (r1Panel) r1Panel.classList.remove('hidden');
+    if (helperUrl) helperUrl.textContent = getHelperLoginUrl();
+    return;
+  }
+
+  if (btnConnect) {
+    btnConnect.textContent = 'Connect';
+    btnConnect.classList.remove('hidden');
+  }
+  if (btnImport) btnImport.classList.add('hidden');
+  if (webOnly) webOnly.classList.remove('hidden');
+  if (r1Panel) r1Panel.classList.add('hidden');
+  showAuthRedirectHint();
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function importLoginKeyFromInput() {
+  const input = document.getElementById('login-key-input');
+  const raw = input && input.value ? input.value.trim() : '';
+  if (!raw) {
+    showAuthStatus('Paste the login key from your phone');
+    return;
+  }
+
+  showAuthStatus('Importing…');
+  try {
+    const data = JSON.parse(atob(raw));
+    if (!data.refreshToken) throw new Error('missing refresh token');
+    state.accessToken = data.accessToken || null;
+    state.refreshToken = data.refreshToken;
+    state.tokenExpiry = data.tokenExpiry || 0;
+    if (!state.accessToken || state.tokenExpiry - Date.now() < 60000) {
+      const ok = await refreshAccessToken();
+      if (!ok) throw new Error('token refresh failed');
+    }
+    await saveTokens();
+    showAuthStatus('');
+    initPlayer();
+    showView('player');
+    fetchPlaylists();
+    startProgressTimer();
+    bootDone();
+  } catch (e) {
+    const msg = 'Invalid key — log in on phone again and re-copy';
+    showAuthStatus(msg);
+    showToast(msg, 5000);
+    bootError(msg);
+  }
 }
 
 // ===========================================
@@ -300,149 +390,18 @@ async function clearCodeVerifier() {
 }
 
 async function startAuth() {
-  if (shouldUseDeviceAuth()) {
-    return startDeviceAuth();
+  if (isCompanionAuthMode()) {
+    showAuthStatus('Use steps ①–③ above (phone login)');
+    return;
   }
   return startPkceRedirectAuth();
 }
 
-/** Phone/computer pairing — works on R1 where OAuth redirect pages are blank. */
-async function startDeviceAuth() {
-  stopDeviceAuth();
-  deviceAuthActive = true;
-  showDeviceAuthPanel(true);
-  showAuthStatus('Getting login code…');
-
-  const btn = document.getElementById('btn-connect');
-  const cancelBtn = document.getElementById('btn-cancel-device');
-  if (btn) btn.disabled = true;
-  if (cancelBtn) cancelBtn.classList.remove('hidden');
-
-  let deviceRes;
-  try {
-    deviceRes = await fetch('https://accounts.spotify.com/api/device_authorization', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: SPOTIFY_CLIENT_ID,
-        scope: SPOTIFY_SCOPES
-      })
-    });
-  } catch (e) {
-    stopDeviceAuth();
-    resetDeviceAuthUI();
-    const msg = 'Network error — check Wi‑Fi';
-    showAuthStatus(msg);
-    bootError(msg);
-    return;
-  }
-
-  if (!deviceRes.ok) {
-    stopDeviceAuth();
-    resetDeviceAuthUI();
-    let detail = 'Could not start login';
-    try {
-      const err = await deviceRes.json();
-      if (err.error_description) detail = err.error_description;
-      else if (err.error) detail = err.error;
-    } catch (e) { /* ignore */ }
-    showAuthStatus(detail);
-    bootError(detail);
-    return;
-  }
-
-  const deviceData = await deviceRes.json();
-  const userCodeEl = document.getElementById('device-user-code');
-  if (userCodeEl) userCodeEl.textContent = deviceData.user_code || '----';
-
-  const deviceCode = deviceData.device_code;
-  const expiresAt = Date.now() + (deviceData.expires_in || 600) * 1000;
-  let intervalSec = deviceData.interval || 5;
-
-  showAuthStatus('Enter code on your phone…');
-
-  while (deviceAuthActive && Date.now() < expiresAt) {
-    await sleep(intervalSec * 1000);
-    if (!deviceAuthActive) break;
-
-    let tokenRes;
-    try {
-      tokenRes = await fetch('https://accounts.spotify.com/api/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: SPOTIFY_CLIENT_ID,
-          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-          device_code: deviceCode
-        })
-      });
-    } catch (e) {
-      showAuthStatus('Retrying…');
-      continue;
-    }
-
-    if (tokenRes.ok) {
-      const data = await tokenRes.json();
-      state.accessToken = data.access_token;
-      state.refreshToken = data.refresh_token;
-      state.tokenExpiry = Date.now() + (data.expires_in * 1000);
-      await saveTokens();
-      stopDeviceAuth();
-      resetDeviceAuthUI();
-      showAuthStatus('');
-      initPlayer();
-      showView('player');
-      fetchPlaylists();
-      startProgressTimer();
-      bootDone();
-      return;
-    }
-
-    let errBody = {};
-    try {
-      errBody = await tokenRes.json();
-    } catch (e) { /* ignore */ }
-    const err = errBody.error;
-
-    if (err === 'authorization_pending') {
-      showAuthStatus('Waiting for you to approve…');
-      continue;
-    }
-    if (err === 'slow_down') {
-      intervalSec += 5;
-      continue;
-    }
-    if (err === 'access_denied') {
-      showAuthStatus('Login cancelled');
-      break;
-    }
-    if (err === 'expired_token') {
-      showAuthStatus('Code expired — try again');
-      break;
-    }
-
-    showAuthStatus(errBody.error_description || err || 'Login failed');
-    bootError(errBody.error_description || err || 'Login failed');
-    break;
-  }
-
-  if (deviceAuthActive && Date.now() >= expiresAt) {
-    showAuthStatus('Code expired — tap Login again');
-  }
-
-  stopDeviceAuth();
-  resetDeviceAuthUI();
-}
-
-function cancelDeviceAuth() {
-  stopDeviceAuth();
-  resetDeviceAuthUI();
-  showAuthStatus('Login cancelled');
-  showView('auth');
-}
-
 /** Browser / desktop OAuth redirect (PKCE). */
 async function startPkceRedirectAuth() {
+  if (isHelperMode() || new URLSearchParams(window.location.search).get('helper') === '1') {
+    markHelperLoginStarted();
+  }
   showAuthStatus('Opening Spotify login…');
   const btn = document.getElementById('btn-connect');
   if (btn) btn.disabled = true;
@@ -535,11 +494,12 @@ async function handleAuthCallback(code) {
 
   // On desktop, the auth callback lands top-level (outside the preview frame).
   // Reload the clean root so the preview shell re-frames the now-authed app.
-  if (runtimeEnv === 'browser' && window.self === window.top) {
+  if (runtimeEnv === 'browser' && window.self === window.top && !isHelperMode()) {
     window.location.replace(SPOTIFY_REDIRECT_URI);
     return true;
   }
-  window.history.replaceState({}, document.title, SPOTIFY_REDIRECT_URI);
+  const cleanUrl = isHelperMode() ? getHelperLoginUrl() : SPOTIFY_REDIRECT_URI;
+  window.history.replaceState({}, document.title, cleanUrl);
   return true;
 }
 
@@ -1350,6 +1310,34 @@ async function init() {
   const urlParams = new URLSearchParams(window.location.search);
   const oauthError = urlParams.get('error');
 
+  if (isHelperMode()) {
+    const code = urlParams.get('code');
+    if (code) {
+      bootStatus('Finishing login…');
+      const success = await handleAuthCallback(code);
+      if (!success) {
+        showView('auth');
+        configureAuthUIForEnv();
+        return 'error';
+      }
+    }
+    const tokens = await loadTokens();
+    if (tokens?.accessToken && tokens?.refreshToken) {
+      state.accessToken = tokens.accessToken;
+      state.refreshToken = tokens.refreshToken;
+      state.tokenExpiry = tokens.tokenExpiry || 0;
+      if (state.tokenExpiry - Date.now() < 60000) {
+        await refreshAccessToken();
+      }
+      showHelperExportView(createLoginKeyFromState());
+      bootDone();
+      return 'helper';
+    }
+    showView('auth');
+    configureAuthUIForEnv();
+    return 'auth';
+  }
+
   if (oauthError) {
     const msg = 'Spotify login cancelled: ' + oauthError;
     showAuthStatus(msg);
@@ -1463,7 +1451,7 @@ document.addEventListener('DOMContentLoaded', () => {
 function wireControls() {
   // Connect button
   document.getElementById('btn-connect').addEventListener('click', startAuth);
-  document.getElementById('btn-cancel-device').addEventListener('click', cancelDeviceAuth);
+  document.getElementById('btn-import-key').addEventListener('click', importLoginKeyFromInput);
 
   document.getElementById('btn-play').addEventListener('click', togglePlay);
   document.getElementById('btn-first').addEventListener('click', firstTrack);

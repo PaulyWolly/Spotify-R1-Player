@@ -32,7 +32,7 @@
     <!-- Dead-simple boot diagnostic. Plain block flow, no fixed/inset CSS so
          even old WebViews render it. main.js removes it once the app starts. -->
     <div id="boot-fallback" style="background:#111;color:#1DB954;font-family:monospace;font-size:12px;line-height:1.5;padding:10px;min-height:100vh;box-sizing:border-box;word-break:break-word;">
-        <div style="font-size:16px;font-weight:bold;color:#ffffff;">HTML OK — build v6</div>
+        <div style="font-size:16px;font-weight:bold;color:#ffffff;">HTML OK — build v7</div>
         <div id="boot-msg" style="margin-top:6px;color:#1DB954;">starting…</div>
         <div style="margin-top:8px;color:#888888;">Browser:</div>
         <div id="boot-ua" style="color:#cccccc;"></div>
@@ -50,15 +50,25 @@
                     <p class="auth-hint">Register this Redirect URI in Spotify Dashboard:</p>
                     <p class="auth-redirect-uri" id="auth-redirect-uri"></p>
                 </div>
-                <div id="auth-device-panel" class="hidden">
-                    <p class="device-pair-label">On phone or PC open</p>
-                    <p class="device-pair-url">spotify.com/pair</p>
-                    <p class="device-pair-label">Enter code:</p>
-                    <p class="device-user-code" id="device-user-code">----</p>
+                <div id="auth-r1-panel" class="hidden">
+                    <p class="auth-step">① On phone or PC, open:</p>
+                    <p class="helper-url" id="helper-login-url">…</p>
+                    <p class="auth-step">② Tap Connect there, log in to Spotify</p>
+                    <p class="auth-step">③ Copy the key, paste below, tap Import</p>
+                    <textarea id="login-key-input" class="login-key-input" rows="2" placeholder="Paste login key"></textarea>
                 </div>
                 <p class="auth-status" id="auth-status" aria-live="polite"></p>
                 <button id="btn-connect" class="btn-primary">Connect</button>
-                <button id="btn-cancel-device" class="btn-secondary hidden" type="button">Cancel</button>
+                <button id="btn-import-key" class="btn-primary hidden" type="button">Import login key</button>
+            </div>
+        </div>
+
+        <!-- Phone login helper: shows key to paste into R1 -->
+        <div id="view-helper-export" class="view">
+            <div class="auth-container">
+                <h1>Login key</h1>
+                <p class="auth-step">Copy ALL of this into your R1 app:</p>
+                <textarea id="login-key-export" class="login-key-input" readonly rows="4"></textarea>
             </div>
         </div>
 
