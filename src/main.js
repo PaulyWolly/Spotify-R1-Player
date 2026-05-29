@@ -844,17 +844,48 @@ function installR1AudioUnlock() {
   document.addEventListener('touchstart', onGesture, { capture: true, passive: true });
 }
 
-function setupPlayer() {
-  if (state.player) return;
+async function destroyPlayer() {
+  if (!state.player) return;
+  try {
+    await state.player.disconnect();
+  } catch (e) {
+    console.warn('disconnect:', e);
+  }
+  state.player = null;
+  state.deviceId = null;
+  state.activeDeviceId = null;
+  state.audioUnlocked = false;
+}
+
+async function setupPlayer() {
+  if (state.player || state._setupPlayerInFlight) return;
+  state._setupPlayerInFlight = true;
+
+  let token = await getValidToken();
+  if (!token && state.refreshToken) {
+    await refreshAccessToken();
+    token = state.accessToken;
+  }
+  if (!token) {
+    state._setupPlayerInFlight = false;
+    showToast('Session expired — log in again', 5000);
+    showView('auth');
+    return;
+  }
+
   const player = new Spotify.Player({
     name: 'R1 Device',
     getOAuthToken: async (cb) => {
-      const token = await getValidToken();
-      if (!token) {
-        showView('auth');
-        return;
+      let t = await getValidToken();
+      if (!t && state.refreshToken) {
+        await refreshAccessToken();
+        t = state.accessToken;
       }
-      cb(token);
+      if (!t) {
+        showToast('Session expired — log in again', 5000);
+        showView('auth');
+      }
+      cb(t || '');
     },
     volume: 0.8
   });
@@ -885,10 +916,25 @@ function setupPlayer() {
 
   player.addListener('initialization_error', ({ message }) => {
     console.error('Init error:', message);
-    const hint = /premium/i.test(message)
-      ? 'Spotify Premium required'
-      : (message ? String(message).slice(0, 72) : 'Player init error');
+    const msg = String(message || '');
+    let hint = msg.slice(0, 72) || 'Player init error';
+    if (/premium/i.test(msg)) hint = 'Spotify Premium required';
+    else if (/initialize/i.test(msg) && !state._playerRetried) {
+      hint = 'Player init failed — retrying…';
+      state._playerRetried = true;
+      destroyPlayer().then(() => {
+        state._setupPlayerInFlight = false;
+        setTimeout(() => setupPlayer(), 1500);
+      });
+    } else if (/initialize/i.test(msg)) {
+      hint = 'Player init failed — log in again (Premium required)';
+    }
     showToast(hint, 5000);
+  });
+
+  player.addListener('account_error', ({ message }) => {
+    console.error('Account error:', message);
+    showToast('Spotify Premium required for playback', 6000);
   });
 
   player.addListener('authentication_error', ({ message }) => {
@@ -910,6 +956,7 @@ function setupPlayer() {
   });
 
   state.player = player;
+  state._setupPlayerInFlight = false;
   const connected = player.connect();
   if (connected && typeof connected.then === 'function') {
     connected.then((ok) => {
