@@ -39,7 +39,7 @@
     <!-- Dead-simple boot diagnostic. Plain block flow, no fixed/inset CSS so
          even old WebViews render it. main.js removes it once the app starts. -->
     <div id="boot-fallback" style="background:#111;color:#1DB954;font-family:monospace;font-size:12px;line-height:1.5;padding:10px;min-height:100vh;box-sizing:border-box;word-break:break-word;">
-        <div style="font-size:16px;font-weight:bold;color:#ffffff;">HTML OK — build v11</div>
+        <div style="font-size:16px;font-weight:bold;color:#ffffff;">HTML OK — build v12</div>
         <div id="boot-msg" style="margin-top:6px;color:#1DB954;">starting…</div>
         <div style="margin-top:8px;color:#888888;">Browser:</div>
         <div id="boot-ua" style="color:#cccccc;"></div>
@@ -62,8 +62,9 @@
                     <p class="pair-code" id="pair-code">------</p>
                     <p class="auth-step">① On phone/PC, open:</p>
                     <p class="helper-url" id="helper-login-url">…</p>
-                    <p class="auth-step">② Tap Connect, log in to Spotify</p>
-                    <p class="auth-step">③ R1 connects automatically</p>
+                    <p class="auth-step">② Tap Connect, log in on PC</p>
+                    <p class="auth-step">③ Leave R1 open — it connects alone</p>
+                    <p class="auth-step" style="color:#ffaa44;">Use this code now. Reloading R1 makes a new code.</p>
                 </div>
                 <p class="auth-status" id="auth-status" aria-live="polite"></p>
                 <button id="btn-connect" class="btn-primary hidden" type="button">Connect</button>

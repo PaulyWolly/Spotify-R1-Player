@@ -201,16 +201,20 @@ function generateSessionCode() {
 
 async function getOrCreateAuthSession() {
   const storageKey = 'spotify_pair_session';
+  // R1: creationStorage survives card reloads; sessionStorage often does not.
+  if (window.creationStorage) {
+    try {
+      const stored = await window.creationStorage.plain.getItem(storageKey);
+      if (stored && /^\d{6}$/.test(stored)) {
+        try { sessionStorage.setItem(storageKey, stored); } catch (e) { /* ignore */ }
+        return stored;
+      }
+    } catch (e) { /* ignore */ }
+  }
   try {
     const existing = sessionStorage.getItem(storageKey);
     if (existing && /^\d{6}$/.test(existing)) return existing;
   } catch (e) { /* ignore */ }
-  if (window.creationStorage) {
-    try {
-      const stored = await window.creationStorage.plain.getItem(storageKey);
-      if (stored && /^\d{6}$/.test(stored)) return stored;
-    } catch (e) { /* ignore */ }
-  }
   const code = generateSessionCode();
   try {
     sessionStorage.setItem(storageKey, code);
