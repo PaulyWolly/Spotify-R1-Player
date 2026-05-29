@@ -159,9 +159,11 @@ function clearHelperLoginFlag() {
 
 /** R1 WebView cannot load Spotify's login page — use phone helper + paste key. */
 function isCompanionAuthMode() {
-  if (window.__SHELL__) return false;
+  if (window.__R1_AUTH__ === false) return false;
   if (isHelperMode()) return false;
-  if (new URLSearchParams(window.location.search).get('desktop') === '1') return false;
+  const q = new URLSearchParams(window.location.search);
+  if (q.get('desktop') === '1') return false;
+  if (q.get('allowRedirect') === '1') return false;
   return true;
 }
 
@@ -391,7 +393,7 @@ async function clearCodeVerifier() {
 
 async function startAuth() {
   if (isCompanionAuthMode()) {
-    showAuthStatus('Use steps ①–③ above (phone login)');
+    showAuthStatus('Use phone login (steps ①–③), then Import');
     return;
   }
   return startPkceRedirectAuth();
@@ -399,6 +401,10 @@ async function startAuth() {
 
 /** Browser / desktop OAuth redirect (PKCE). */
 async function startPkceRedirectAuth() {
+  if (isCompanionAuthMode() || window.__R1_AUTH__) {
+    showAuthStatus('On R1: use phone login, then Import');
+    return;
+  }
   if (isHelperMode() || new URLSearchParams(window.location.search).get('helper') === '1') {
     markHelperLoginStarted();
   }
@@ -1417,7 +1423,7 @@ function renderDesktopShell() {
     'box-shadow:0 0 0 2px #2a2a2a,0 20px 60px rgba(0,0,0,0.6);';
 
   const iframe = document.createElement('iframe');
-  iframe.src = window.location.pathname + '?app=1';
+  iframe.src = window.location.pathname + '?app=1&desktop=1';
   iframe.style.cssText = 'width:240px;height:282px;border:0;display:block;';
   frame.appendChild(iframe);
   document.body.appendChild(frame);

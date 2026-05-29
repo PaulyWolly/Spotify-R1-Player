@@ -19,11 +19,15 @@
         // browser (not the R1, not already inside the preview iframe, not an
         // auth callback), render the app inside a true 240x282 frame scaled 2x
         // so it looks exactly like the device. The R1 path is unaffected.
+        // Desktop preview frame ONLY with ?preview=1 — never on the R1 (wide WebView
+        // was triggering the shell and hiding the R1 login instructions).
         window.__SHELL__ = !onR1 &&
+          q.get('preview') === '1' &&
           window.innerWidth >= 420 &&
           window.self === window.top &&
           !q.has('code') &&
           q.get('app') !== '1';
+        window.__R1_AUTH__ = q.get('desktop') !== '1' && q.get('helper') !== '1' && q.get('allowRedirect') !== '1';
       })();
     </script>
     <link rel="stylesheet" href="/src/style.css">
@@ -32,7 +36,7 @@
     <!-- Dead-simple boot diagnostic. Plain block flow, no fixed/inset CSS so
          even old WebViews render it. main.js removes it once the app starts. -->
     <div id="boot-fallback" style="background:#111;color:#1DB954;font-family:monospace;font-size:12px;line-height:1.5;padding:10px;min-height:100vh;box-sizing:border-box;word-break:break-word;">
-        <div style="font-size:16px;font-weight:bold;color:#ffffff;">HTML OK — build v7</div>
+        <div style="font-size:16px;font-weight:bold;color:#ffffff;">HTML OK — build v8</div>
         <div id="boot-msg" style="margin-top:6px;color:#1DB954;">starting…</div>
         <div style="margin-top:8px;color:#888888;">Browser:</div>
         <div id="boot-ua" style="color:#cccccc;"></div>
@@ -46,20 +50,20 @@
                 <div class="spotify-icon">♫</div>
                 <h1>Spotify</h1>
                 <p class="auth-subtitle">Premium account required</p>
-                <div id="auth-web-only">
+                <div id="auth-web-only" class="hidden">
                     <p class="auth-hint">Register this Redirect URI in Spotify Dashboard:</p>
                     <p class="auth-redirect-uri" id="auth-redirect-uri"></p>
                 </div>
-                <div id="auth-r1-panel" class="hidden">
+                <div id="auth-r1-panel">
                     <p class="auth-step">① On phone or PC, open:</p>
-                    <p class="helper-url" id="helper-login-url">…</p>
+                    <p class="helper-url" id="helper-login-url">https://kaleidoscopic-paprenjak-c5d184.netlify.app/?helper=1</p>
                     <p class="auth-step">② Tap Connect there, log in to Spotify</p>
                     <p class="auth-step">③ Copy the key, paste below, tap Import</p>
                     <textarea id="login-key-input" class="login-key-input" rows="2" placeholder="Paste login key"></textarea>
                 </div>
                 <p class="auth-status" id="auth-status" aria-live="polite"></p>
-                <button id="btn-connect" class="btn-primary">Connect</button>
-                <button id="btn-import-key" class="btn-primary hidden" type="button">Import login key</button>
+                <button id="btn-connect" class="btn-primary hidden" type="button">Connect</button>
+                <button id="btn-import-key" class="btn-primary" type="button">Import login key</button>
             </div>
         </div>
 
