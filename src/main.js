@@ -59,11 +59,8 @@ const state = {
 let companionPollTimer = null;
 let r1ApiSyncInterval = null;
 let r1AudioKeepaliveInterval = null;
-let r1StreamRefreshInterval = null;
+let r1AutoRenewInterval = null;
 let r1AudioHintTimer = null;
-/** Holds WebView audio session open (stops ~10s cutout on Android WebViews). */
-let r1SilentAudioHold = null;
-let r1WakeLock = null;
 let cachedPairSession = null;
 let companionLoginStarted = false;
 
@@ -829,8 +826,6 @@ function initPlayer() {
 /** Must run synchronously inside tap/click — do not await before this on R1. */
 function gestureActivateAudioSync() {
   if (runtimeEnv !== 'r1') return;
-  startR1SilentAudioHold();
-  requestR1WakeLock();
   if (!state.player) {
     state._pendingAudioGesture = true;
     return;
@@ -844,64 +839,6 @@ function gestureActivateAudioSync() {
   } catch (e) {
     console.warn('gestureActivateAudioSync:', e);
   }
-}
-
-/** Near-silent loop keeps the R1 WebView audio session alive past the ~10s cutoff. */
-function startR1SilentAudioHold() {
-  if (runtimeEnv !== 'r1') return;
-  try {
-    if (r1SilentAudioHold?.ctx?.state === 'suspended') {
-      r1SilentAudioHold.ctx.resume().catch(() => {});
-      return;
-    }
-    if (r1SilentAudioHold) return;
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return;
-    const ctx = new Ctx();
-    const buffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.loop = true;
-    const gain = ctx.createGain();
-    gain.gain.value = 0.0001;
-    source.connect(gain);
-    gain.connect(ctx.destination);
-    source.start(0);
-    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-    r1SilentAudioHold = { ctx, source, gain };
-  } catch (e) {
-    console.warn('startR1SilentAudioHold:', e);
-  }
-}
-
-function stopR1SilentAudioHold() {
-  if (!r1SilentAudioHold) return;
-  try {
-    r1SilentAudioHold.source.stop();
-    r1SilentAudioHold.ctx.close();
-  } catch (e) { /* ignore */ }
-  r1SilentAudioHold = null;
-}
-
-async function requestR1WakeLock() {
-  if (runtimeEnv !== 'r1' || !('wakeLock' in navigator)) return;
-  try {
-    if (r1WakeLock) return;
-    r1WakeLock = await navigator.wakeLock.request('screen');
-    r1WakeLock.addEventListener('release', () => {
-      r1WakeLock = null;
-    });
-  } catch (e) {
-    console.warn('wakeLock:', e);
-  }
-}
-
-function releaseR1WakeLock() {
-  if (!r1WakeLock) return;
-  try {
-    r1WakeLock.release();
-  } catch (e) { /* ignore */ }
-  r1WakeLock = null;
 }
 
 function showR1AudioContinueHint() {
@@ -923,42 +860,74 @@ function armR1AudioContinuePrompt() {
     if (state.isPlaying && state.currentView === 'player') {
       showR1AudioContinueHint();
     }
-  }, 7500);
+  }, 6000);
 }
 
-/** Re-seek current position to refresh DRM/stream (before the 10s WebView drop). */
-async function r1RefreshPlaybackStream() {
-  if (runtimeEnv !== 'r1' || !state.player || !state.isPlaying) return;
-  startR1SilentAudioHold();
-  try {
-    const cur = await state.player.getCurrentState();
-    if (!cur?.track_window?.current_track) return;
-    const pos = Math.max(0, cur.position);
-    await state.player.seek(pos);
-    await state.player.setVolume(1);
-    if (cur.paused) await state.player.resume();
-    await spotifyFetch(`/me/player/seek${playerDeviceQuery()}`, {
+/**
+ * R1 WebView drops Spotify audio ~10s in. Re-issue play+seek via API (no SDK seek —
+ * that was likely causing the cutoff). Runs on a timer before the 10s wall.
+ */
+async function r1RenewPlaybackSession() {
+  if (runtimeEnv !== 'r1' || !state.isPlaying || !state.deviceId) return false;
+  const pos = Math.max(0, Math.floor(state.progressMs));
+  await ensurePlaybackDevice();
+  await forceUnlockR1Audio();
+
+  let ok = false;
+  const contextUri = state.playingPlaylistUri || state.currentPlaylistUri;
+  if (contextUri) {
+    let offset = 0;
+    if (state.currentPlaylistTracks.length && state.currentTrack?.uri) {
+      const idx = state.currentPlaylistTracks.findIndex(
+        (t) => t.uri === state.currentTrack.uri
+      );
+      if (idx >= 0) offset = idx;
+    }
+    const result = await spotifyFetch(playerPlayEndpoint(), {
       method: 'PUT',
-      body: JSON.stringify({ position_ms: Math.floor(pos) })
+      body: JSON.stringify({ context_uri: contextUri, offset: { position: offset } })
     });
-  } catch (e) {
-    console.warn('r1RefreshPlaybackStream:', e);
+    ok = !result?._error;
+  } else if (state.currentTrack?.uri) {
+    const result = await spotifyFetch(playerPlayEndpoint(), {
+      method: 'PUT',
+      body: JSON.stringify({ uris: [state.currentTrack.uri] })
+    });
+    ok = !result?._error;
+  }
+  if (!ok) return false;
+
+  await spotifyFetch(`/me/player/seek${playerDeviceQuery()}`, {
+    method: 'PUT',
+    body: JSON.stringify({ position_ms: pos })
+  });
+  await startR1LocalAudio();
+  return true;
+}
+
+function startR1AutoRenew() {
+  stopR1AutoRenew();
+  if (runtimeEnv !== 'r1') return;
+  r1AutoRenewInterval = setInterval(() => {
+    if (state.isPlaying) r1RenewPlaybackSession();
+  }, 8000);
+}
+
+function stopR1AutoRenew() {
+  if (r1AutoRenewInterval) {
+    clearInterval(r1AutoRenewInterval);
+    r1AutoRenewInterval = null;
   }
 }
 
-/** R1: re-unlock audio several times right after starting playback (WebView drops ~10s). */
+/** R1: unlock audio after play starts; auto-renew stream every 8s. */
 function scheduleR1AudioBoost() {
   if (runtimeEnv !== 'r1') return;
   armR1AudioContinuePrompt();
-  requestR1WakeLock();
-  startR1SilentAudioHold();
+  startR1AutoRenew();
   startR1LocalAudio();
-  [400, 1500, 3500, 7000, 9500, 12000, 16000].forEach((ms) => {
-    setTimeout(() => {
-      startR1LocalAudio();
-      if (ms >= 7000) r1RefreshPlaybackStream();
-    }, ms);
-  });
+  setTimeout(() => startR1LocalAudio(), 500);
+  setTimeout(() => r1RenewPlaybackSession(), 8200);
 }
 
 function fixSpotifyEmbedIframe() {
@@ -985,21 +954,21 @@ async function reconnectSpotifyPlayer() {
   }
 }
 
-/** Re-unlock WebView audio and resume SDK playback (R1 drops output after ~10s). */
+/** Re-unlock WebView audio and re-start the stream (R1 drops output after ~10s). */
 async function recoverR1Audio() {
   if (runtimeEnv !== 'r1' || !state.player) return;
   fixSpotifyEmbedIframe();
   gestureActivateAudioSync();
-  await forceUnlockR1Audio();
   if (!state.deviceId) await reconnectSpotifyPlayer();
-  await ensurePlaybackDevice();
-  try {
-    const snap = await fetchPlayerSnapshot();
-    if (snap?.is_playing) {
-      await resumeLocalPlayback();
+  const renewed = await r1RenewPlaybackSession();
+  if (!renewed) {
+    await forceUnlockR1Audio();
+    try {
+      const snap = await fetchPlayerSnapshot();
+      if (snap?.is_playing) await resumeLocalPlayback();
+    } catch (e) {
+      console.warn('recoverR1Audio:', e);
     }
-  } catch (e) {
-    console.warn('recoverR1Audio:', e);
   }
 }
 
@@ -1142,6 +1111,7 @@ async function setupPlayer() {
 
   const player = new Spotify.Player({
     name: runtimeEnv === 'r1' ? 'Rabbit R1' : 'R1 Device',
+    enableMediaSession: true,
     getOAuthToken: async (cb) => {
       let t = await getValidToken();
       if (!t && state.refreshToken) {
@@ -1257,12 +1227,13 @@ async function setupPlayer() {
   }
 }
 
-async function transferPlayback(deviceId) {
-  if (!deviceId || state.activeDeviceId === deviceId) return;
+async function transferPlayback(deviceId, play = false) {
+  if (!deviceId) return;
+  if (!play && state.activeDeviceId === deviceId) return;
   state.playbackErrorMuteUntil = Date.now() + 2500;
   const result = await spotifyFetch('/me/player', {
     method: 'PUT',
-    body: JSON.stringify({ device_ids: [deviceId], play: false })
+    body: JSON.stringify({ device_ids: [deviceId], play: !!play })
   });
   if (!result?._error) state.activeDeviceId = deviceId;
 }
@@ -1449,8 +1420,7 @@ async function togglePlay() {
 
   if (playing) {
     hideR1AudioContinueHint();
-    stopR1SilentAudioHold();
-    releaseR1WakeLock();
+    stopR1AutoRenew();
     await apiPausePlayback();
     if (state.player) {
       try { await state.player.pause(); } catch (e) { /* ignore */ }
@@ -1588,6 +1558,7 @@ async function playContext(contextUri, offset = 0) {
   if (runtimeEnv === 'r1') {
     if (!(await ensurePlayerFromGesture())) return false;
     await preparePlaybackForUserAction();
+    if (state.deviceId) await transferPlayback(state.deviceId, true);
   } else {
     if (!(await ensureBrowserPlayer())) {
       showToast('Player not ready — wait a moment', 3500);
@@ -1615,6 +1586,7 @@ async function playTrackUris(uris, offset = 0) {
   if (runtimeEnv === 'r1') {
     if (!(await ensurePlayerFromGesture())) return false;
     await preparePlaybackForUserAction();
+    if (state.deviceId) await transferPlayback(state.deviceId, true);
   } else {
     if (!(await ensureBrowserPlayer())) {
       showToast('Player not ready — wait a moment', 3500);
@@ -1918,25 +1890,19 @@ function updateProgress() {
 
 function startR1AudioKeepalive() {
   if (r1AudioKeepaliveInterval) clearInterval(r1AudioKeepaliveInterval);
-  if (r1StreamRefreshInterval) clearInterval(r1StreamRefreshInterval);
   if (runtimeEnv !== 'r1') return;
   r1AudioKeepaliveInterval = setInterval(() => {
     if (!state.isPlaying || !state.player) return;
-    startR1SilentAudioHold();
     unlockWebAudio(true).catch(() => {});
     state.player.setVolume(1).catch(() => {});
-  }, 2000);
-  r1StreamRefreshInterval = setInterval(() => {
-    if (!state.isPlaying) return;
-    r1RefreshPlaybackStream();
-  }, 8500);
+  }, 3000);
 }
 
 function startProgressTimer() {
   if (state.progressInterval) clearInterval(state.progressInterval);
   if (r1ApiSyncInterval) clearInterval(r1ApiSyncInterval);
   if (r1AudioKeepaliveInterval) clearInterval(r1AudioKeepaliveInterval);
-  if (r1StreamRefreshInterval) clearInterval(r1StreamRefreshInterval);
+  stopR1AutoRenew();
   if (runtimeEnv === 'r1') {
     state.progressInterval = setInterval(() => {
       if (state.isPlaying && state.durationMs > 0) {
@@ -2190,7 +2156,7 @@ window.addEventListener('sideClick', () => {
     const hint = document.getElementById('r1-audio-hint');
     if (hint && !hint.classList.contains('hidden')) {
       hideR1AudioContinueHint();
-      recoverR1Audio();
+      r1RenewPlaybackSession();
       armR1AudioContinuePrompt();
       return;
     }
@@ -2406,7 +2372,7 @@ function wireControls() {
   if (r1AudioHint) {
     bindTap(r1AudioHint, () => {
       hideR1AudioContinueHint();
-      recoverR1Audio();
+      r1RenewPlaybackSession();
       armR1AudioContinuePrompt();
     });
   }
